@@ -59,12 +59,18 @@ async function runAutoCheck(targetsToRun, onProgress) {
   try {
     if (onProgress) onProgress('log', '啟動瀏覽器...');
     browser = await chromium.launch({ 
-      headless: true, // 部署於雲端伺服器時須切為 true
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--incognito'] 
+      headless: true,
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled'
+      ] 
     });
 
     for (const [index, item] of targetsToRun.entries()) {
       if (onProgress) onProgress('log', `[${index + 1}/${targetsToRun.length}] 檢測: ${item.name}`);
+      
       const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
         viewport: { width: 390, height: 844 }
@@ -85,8 +91,7 @@ async function runAutoCheck(targetsToRun, onProgress) {
       });
 
       try {
-        await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await page.waitForTimeout(2000);
+        await page.goto(item.url, { waitUntil: 'networkidle', timeout: 30000 });
 
         for (const selector of COOKIE_SELECTORS) {
           try {
@@ -98,8 +103,10 @@ async function runAutoCheck(targetsToRun, onProgress) {
             }
           } catch (e) {}
         }
-        await page.waitForTimeout(4000);
-      } catch (e) {}
+        await page.waitForTimeout(3000);
+      } catch (e) {
+        if (onProgress) onProgress('log', `⚠️ 頁面載入逾時/異常: ${item.name}`);
+      }
 
       const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
       const resItem = { 
