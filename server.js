@@ -49,27 +49,24 @@ const COOKIE_SELECTORS = [
 async function testSingleItem(item) {
   let browser;
   try {
-    // 記憶體極限優化參數
     browser = await chromium.launch({ 
       headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-zygote',
-        '--single-process'
+        '--disable-blink-features=AutomationControlled'
       ] 
     });
     
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-      viewport: { width: 390, height: 844 }
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      locale: 'zh-TW',
+      extraHTTPHeaders: {
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+      }
     });
 
-    // 封鎖圖片與 CSS 以極速載入並省記憶體
-    await context.route('**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}', route => route.abort());
-    
     const page = await context.newPage();
     let expCampaign = "";
     try { expCampaign = new URL(item.url).searchParams.get("utm_campaign") || ""; } catch(e){}
@@ -86,7 +83,7 @@ async function testSingleItem(item) {
     });
 
     try {
-      await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.goto(item.url, { waitUntil: 'commit', timeout: 15000 });
 
       for (const selector of COOKIE_SELECTORS) {
         try {
@@ -98,7 +95,7 @@ async function testSingleItem(item) {
           }
         } catch (e) {}
       }
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(3000);
     } catch (e) {}
 
     const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
@@ -151,7 +148,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
           <div>
             <h1 class="text-xl font-bold text-sky-400">📊 GA4 UTM 監測儀表板</h1>
-            <p class="text-xs text-slate-400">輕量化正式版</p>
+            <p class="text-xs text-slate-400">抗阻擋穩定版</p>
           </div>
           <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-5 py-2.5 rounded-lg w-full sm:w-auto shadow-lg">
             🚀 執行測試
@@ -263,22 +260,17 @@ app.get('/', (req, res) => {
 
             const card = document.getElementById('card-' + id);
             if (card) {
-              card.querySelector('.status-cookie').innerHTML = '⏳';
-              card.querySelector('.status-pv').innerHTML = '⏳';
-              card.querySelector('.status-campaign').innerHTML = '⏳';
+              card.querySelector('.status-cookie').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-pv').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-campaign').innerHTML = '⏳ 檢測中';
             }
 
             try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 18000); // 18 秒強制斷開避免阻塞
-
               const res = await fetch('/api/run-single', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id }),
-                signal: controller.signal
+                body: JSON.stringify({ id })
               });
-              clearTimeout(timeoutId);
 
               const r = await res.json();
 
@@ -287,17 +279,21 @@ app.get('/', (req, res) => {
                 card.querySelector('.status-pv').innerHTML = r.pageView ? '<span class="text-emerald-400 font-bold">✅ 成功</span>' : '<span class="text-rose-400 font-bold">❌ 失敗</span>';
                 card.querySelector('.status-campaign').innerHTML = r.campaign ? '<span class="text-emerald-400 font-bold">✅ 帶入</span>' : '<span class="text-amber-400 font-bold">⚠️ 無參數</span>';
               } else if (card) {
+                card.querySelector('.status-cookie').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
                 card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
+                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
               }
             } catch (e) {
               if (card) {
+                card.querySelector('.status-cookie').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
                 card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
+                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
               }
             }
           }
 
           btn.disabled = false;
-          statusText.textContent = '✨ 檢測完成！';
+          statusText.textContent = '✨ 勾選項目檢測完成！';
         }
 
         loadTargets();
