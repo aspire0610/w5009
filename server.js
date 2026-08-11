@@ -2,7 +2,6 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 完整 34 個檢測目標清單
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
   { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true },
@@ -141,10 +140,30 @@ app.get('/', (req, res) => {
       <div class="max-w-4xl mx-auto space-y-4">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速儀表板</h1>
-            <p class="text-xs text-slate-400">免瀏覽器版</p>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速查儀表板</h1>
+            <p class="text-xs text-slate-400">免瀏覽器·超高速API版</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
+        </div>
+
+        <!-- 數據統計儀表板 -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs">
+          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
+            <div class="text-slate-400 mb-1">累積測試輪次</div>
+            <span id="statRounds" class="text-lg font-extrabold text-sky-400">0</span>
+          </div>
+          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
+            <div class="text-slate-400 mb-1">累積檢測總項</div>
+            <span id="statTotalChecks" class="text-lg font-extrabold text-slate-200">0</span>
+          </div>
+          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
+            <div class="text-slate-400 mb-1">成功通過項</div>
+            <span id="statSuccessCount" class="text-lg font-extrabold text-emerald-400">0</span>
+          </div>
+          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
+            <div class="text-slate-400 mb-1">異常/缺失項</div>
+            <span id="statFailCount" class="text-lg font-extrabold text-rose-400">0</span>
+          </div>
         </div>
 
         <!-- 選項與自動定時控制列 -->
@@ -154,18 +173,20 @@ app.get('/', (req, res) => {
             <span>全選 / 全不選</span>
           </label>
 
-          <div class="flex items-center space-x-3 text-xs bg-slate-900/60 p-1.5 rounded-lg border border-slate-700/60">
+          <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
-              <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-3.5 h-3.5 rounded text-sky-500 bg-slate-900 border-slate-700">
-              <span class="text-slate-300 font-medium">🔄 自動輪詢</span>
+              <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
+              <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
             </label>
-            <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-slate-200 rounded border border-slate-700 px-1.5 py-0.5 outline-none text-xs">
-              <option value="5">每 5 分鐘</option>
-              <option value="15">每 15 分鐘</option>
-              <option value="30" selected>每 30 分鐘</option>
-              <option value="60">每 1 小時</option>
+            <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
+              <option value="10">每 10 秒 (測試用)</option>
+              <option value="30">每 30 秒 (測試用)</option>
+              <option value="60">每 1 分鐘</option>
+              <option value="300" selected>每 5 分鐘</option>
+              <option value="900">每 15 分鐘</option>
+              <option value="1800">每 30 分鐘</option>
             </select>
-            <span id="countdownText" class="text-sky-400 hidden font-mono"></span>
+            <span id="countdownText" class="text-amber-400 font-mono font-bold"></span>
           </div>
 
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
@@ -181,11 +202,17 @@ app.get('/', (req, res) => {
         let countdownTimer = null;
         let remainingSeconds = 0;
 
+        let totalRounds = 0;
+        let totalChecks = 0;
+        let totalSuccess = 0;
+        let totalFail = 0;
+
         async function init() {
           const res = await fetch('/api/targets');
           targets = await res.json();
           renderCards();
           updateCount();
+          updateCountdownDisplay();
         }
 
         function renderCards() {
@@ -229,15 +256,12 @@ app.get('/', (req, res) => {
 
         function toggleAutoCheck() {
           const enabled = document.getElementById('autoCheckToggle').checked;
-          const countdownText = document.getElementById('countdownText');
-
           if (enabled) {
-            countdownText.classList.remove('hidden');
             startAutoTimer();
           } else {
-            countdownText.classList.add('hidden');
             clearInterval(autoTimer);
             clearInterval(countdownTimer);
+            updateCountdownDisplay();
           }
         }
 
@@ -251,25 +275,40 @@ app.get('/', (req, res) => {
           clearInterval(autoTimer);
           clearInterval(countdownTimer);
 
-          const minutes = parseInt(document.getElementById('intervalSelect').value, 10);
-          remainingSeconds = minutes * 60;
-
+          remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
           updateCountdownDisplay();
 
           countdownTimer = setInterval(() => {
             remainingSeconds--;
             if (remainingSeconds <= 0) {
-              remainingSeconds = minutes * 60;
               runTest();
+              remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
             }
             updateCountdownDisplay();
           }, 1000);
         }
 
         function updateCountdownDisplay() {
+          const enabled = document.getElementById('autoCheckToggle').checked;
+          const countdownText = document.getElementById('countdownText');
+
+          if (!enabled) {
+            countdownText.textContent = '(未開啟)';
+            countdownText.className = 'text-slate-500 text-xs font-mono';
+            return;
+          }
+
           const m = Math.floor(remainingSeconds / 60);
           const s = remainingSeconds % 60;
-          document.getElementById('countdownText').textContent = \`(\${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')} 後刷新)\`;
+          countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')} 後觸發\`;
+          countdownText.className = 'text-amber-400 font-mono font-bold';
+        }
+
+        function updateStatsUI() {
+          document.getElementById('statRounds').textContent = totalRounds;
+          document.getElementById('statTotalChecks').textContent = totalChecks;
+          document.getElementById('statSuccessCount').textContent = totalSuccess;
+          document.getElementById('statFailCount').textContent = totalFail;
         }
 
         function runTest() {
@@ -282,6 +321,9 @@ app.get('/', (req, res) => {
           startBtn.classList.add('opacity-50');
           statusBox.classList.remove('hidden');
 
+          totalRounds++;
+          updateStatsUI();
+
           const evtSource = new EventSource('/api/run-test?ids=' + selected.join(','));
 
           evtSource.onmessage = (e) => {
@@ -292,6 +334,16 @@ app.get('/', (req, res) => {
               const r = data.data;
               const card = document.getElementById('card-' + r.id);
               
+              const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
+              
+              totalChecks++;
+              if (isPass) {
+                totalSuccess++;
+              } else {
+                totalFail++;
+              }
+              updateStatsUI();
+
               const statusEl = card.querySelector('.status-val');
               statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
               statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
