@@ -3,102 +3,97 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 let targetList = [
-  { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: false },
-  { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: false },
-  { id: "3", name: "Rollout 家具海報", url: "https://www.costco.com.tw/content/showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=Poster-FurnitureRollOut", enabled: false },
-  { id: "4", name: "Rollout Lsign", url: "https://www.costco.com.tw/content/showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-FurnitureRollOut", enabled: false },
-  { id: "5", name: "吊掛", url: "https://www.costco.com.tw/c/hero-showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=showroom-hangingbanner", enabled: false },
-  { id: "6", name: "易拉展", url: "https://www.costco.com.tw/c/hero-showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=showroom-rollupbanner", enabled: false },
-  { id: "7", name: "Lsign 通用", url: "https://www.costco.com.tw/c/OnlineExclusive?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-OnlineExclusive", enabled: false },
-  { id: "8", name: "Lsign 家電", url: "https://www.costco.com.tw/Televisions-Appliances/Large-Appliances/c/301?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Appliances", enabled: false },
-  { id: "9", name: "Lsign 電視", url: "https://www.costco.com.tw/Televisions-Appliances/TV-Home-Entertainment/c/101?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-tvs", enabled: false },
-  { id: "10", name: "Lsign 輪胎", url: "https://www.costco.com.tw/Sports-Lifestyle/Automotive/c/1421?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Tire", enabled: false },
-  { id: "11", name: "Lsign 玩具", url: "https://www.costco.com.tw/Household-Baby-Toys/Toys/c/1308?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D28", enabled: false },
-  { id: "12", name: "Lsign HABA", url: "https://www.costco.com.tw/Health-Beauty/Personal-Care/c/801?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D20", enabled: false },
-  { id: "13", name: "Lsign 運動", url: "https://www.costco.com.tw/Sports-Lifestyle/Sports-Fitness/c/1209?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D26", enabled: false },
-  { id: "14", name: "Lsign 服飾", url: "https://www.costco.com.tw/Clothing-Accessories/c/9?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D31D39", enabled: false },
-  { id: "15", name: "Lsign 食品", url: "https://www.costco.com.tw/Food-Dining/c/CL8?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D12D13", enabled: false },
-  { id: "16", name: "Lsign 五金", url: "https://www.costco.com.tw/Furniture-Kitchen/Hardware-DIY/c/605?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D23", enabled: false },
-  { id: "17", name: "Lsign 床墊", url: "https://www.costco.com.tw/Furniture-Kitchen/Bedding/Mattress-Toppers/c/60205?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Mattress", enabled: false },
-  { id: "18", name: "Lsign 儲藏屋", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Outdoor-Storage/c/40201?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D27", enabled: false },
-  { id: "19", name: "Lsign 沙發", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Sofas-Sectionals/c/50202?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D38", enabled: false },
-  { id: "20", name: "ENDCAP", url: "https://www.costco.com.tw/c/OnlineExclusive?utm_source=warehouse&utm_medium=W5009&utm_campaign=Endcap-OnlineEX", enabled: false },
-  { id: "21", name: "靜電貼紙 同價", url: "https://www.costco.com.tw/Same-Price/c/hero-sameprice?utm_source=warehouse&utm_medium=W5009&utm_campaign=Sticker-SamePrice", enabled: false },
-  { id: "22", name: "M / L Sign 同價", url: "https://www.costco.com.tw/Same-Price/c/hero-sameprice?utm_source=warehouse&utm_medium=W5009&utm_campaign=Sign-SamePrice", enabled: false },
-  { id: "23", name: "fy26p8 Minispotlight 週期購", url: "https://www.costco.com.tw/content/subscription?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p8_Minispotlight_Subscription", enabled: false },
-  { id: "24", name: "fy26p8 Minispotlight Costco APP", url: "https://www.costco.com.tw/costco-app?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p8_Minispotlight_CostcoApp", enabled: false },
-  { id: "25", name: "fy26 p10 app poster iOS", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_app_poster_iOS", enabled: false },
-  { id: "26", name: "fy26 p10 app poster Android", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_app_poster_Android", enabled: false },
-  { id: "27", name: "fy26 p10 minispotlight iOS", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_mini_spotlight_iOS", enabled: false },
-  { id: "28", name: "fy26 p10 minispotlight Android", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_mini_spotlight_Android", enabled: false },
-  { id: "29", name: "fy26p10w4 EM", url: "https://www.costco.com.tw/executive-rewards?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p_10w4_EM", enabled: false },
-  { id: "30", name: "fy26p10w4 D27", url: "https://www.costco.com.tw/Lawn-Garden/Patio-Furniture/Outdoor-Patio-Furniture/c/40102?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_banner_d27", enabled: false },
-  { id: "31", name: "fy26p12w3 Showroom (Sofas)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Sofas-Sectionals/c/50202?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_Sofas", enabled: false },
-  { id: "32", name: "fy26p12w3 Showroom (Cabinets)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Cabinets-Tables/c/50407?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_Cabinets", enabled: false },
-  { id: "33", name: "fy26p12w3 Showroom (DiningSets)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Dining-Sets/c/50301?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_DiningSets", enabled: false },
-  { id: "34", name: "fy26p12w3 Showroom (ComputerDesk)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: false }
+  { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
+  { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true }
 ];
 
-async function testSingleItem(item) {
+// 擬真瀏覽器請求頭（防止被 Cloudflare / 防火牆攔截 403）
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
+};
+
+async function checkUrl(item) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000); // 6秒連線逾時
-
     const response = await fetch(item.url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
-      },
-      signal: controller.signal
+      headers: BROWSER_HEADERS,
+      redirect: 'follow'
     });
-    clearTimeout(timeout);
 
-    const html = await response.text();
+    const statusOk = response.status === 200;
     const finalUrl = response.url;
-    
-    // 解析 UTM
-    let expCampaign = "";
-    try { expCampaign = new URL(item.url).searchParams.get("utm_campaign") || ""; } catch(e){}
+    const htmlText = await response.text();
 
-    // 檢查 1: HTTP 狀態碼
-    const isStatusOk = response.status >= 200 && response.status < 400;
+    // 1. UTM 參數檢查：檢查轉址後的 URL 是否還保留原始 utm 參數
+    let hasUtm = false;
+    try {
+      const originalParams = new URL(item.url).searchParams;
+      const finalParams = new URL(finalUrl).searchParams;
+      const expectedCampaign = originalParams.get('utm_campaign');
+      
+      if (expectedCampaign) {
+        hasUtm = finalParams.get('utm_campaign') === expectedCampaign;
+      } else {
+        hasUtm = Array.from(originalParams.keys()).some(k => k.startsWith('utm_') && finalParams.has(k));
+      }
+    } catch (e) {
+      hasUtm = false;
+    }
 
-    // 檢查 2: UTM 是否保存在最終 URL
-    const hasCampaignInUrl = expCampaign ? finalUrl.includes(expCampaign) : false;
+    // 2. GA4 / GTM 深入比對（涵蓋 Inline GA4, GTM 容器, gtag.js）
+    const hasGa4MeasurementId = /G-[A-Z0-9]{8,12}/i.test(htmlText);
+    const hasGtmContainer = /GTM-[A-Z0-9]{4,10}/i.test(htmlText);
+    const hasGoogleTagScript = htmlText.includes('googletagmanager.com/gtag/js') || htmlText.includes('google-analytics.com');
 
-    // 檢查 3: 網頁 HTML 中是否包含 GA / GTM 追蹤碼片段
-    const hasGA4Script = html.includes('GTM-') || html.includes('gtag') || html.includes('google-analytics.com');
+    const ga4Detected = hasGa4MeasurementId || hasGtmContainer || hasGoogleTagScript;
 
-    return { 
-      id: item.id, name: item.name, url: item.url, 
-      statusOk: isStatusOk, campaign: hasCampaignInUrl, ga4Script: hasGA4Script,
-      time: new Date().toLocaleTimeString() 
+    return {
+      id: item.id,
+      name: item.name,
+      url: item.url,
+      status: response.status,
+      statusText: statusOk ? '正常(200)' : `異常(${response.status})`,
+      utmKept: hasUtm ? '保留' : '丟失/未帶入',
+      ga4Exist: ga4Detected ? '存在' : '未發現'
     };
-  } catch (err) {
-    return { id: item.id, error: err.message };
+  } catch (error) {
+    return {
+      id: item.id,
+      name: item.name,
+      url: item.url,
+      status: 0,
+      statusText: '連線失敗',
+      utmKept: '無',
+      ga4Exist: '無'
+    };
   }
 }
 
 app.use(express.json());
+
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-app.post('/api/targets/toggle', (req, res) => {
-  const { ids } = req.body;
-  if (Array.isArray(ids)) {
-    targetList.forEach(t => t.enabled = ids.includes(t.id));
-  }
-  res.json({ success: true });
-});
+app.get('/api/run-test', async (req, res) => {
+  const ids = req.query.ids ? req.query.ids.split(',') : [];
+  const selectedTargets = targetList.filter(t => ids.includes(t.id));
 
-app.post('/api/run-single', async (req, res) => {
-  const { id } = req.body;
-  const item = targetList.find(t => t.id === id);
-  if (!item) return res.status(404).json({ error: '找不到該項目' });
-  
-  const result = await testSingleItem(item);
-  res.json(result);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+
+  for (const [index, item] of selectedTargets.entries()) {
+    sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] 正在檢測: ${item.name}...` });
+    const result = await checkUrl(item);
+    sendEvent('result', { data: result });
+  }
+
+  sendEvent('done', {});
+  res.end();
 });
 
 app.get('/', (req, res) => {
@@ -108,164 +103,50 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>UTM & 網頁連結速查儀表板</title>
+      <title>⚡ UTM & 網頁連結速查儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    <body class="bg-slate-900 text-slate-100 min-h-screen pb-20">
-      <div class="max-w-4xl mx-auto p-4 space-y-4">
-        
-        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
-          <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速查儀表板</h1>
-            <p class="text-xs text-slate-400">免瀏覽器·超高速API版</p>
-          </div>
-          <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-5 py-2.5 rounded-lg w-full sm:w-auto shadow-lg">
-            🚀 執行測試
-          </button>
-        </div>
-
-        <div class="flex items-center justify-between bg-slate-800 p-3 rounded-xl border border-slate-700">
-          <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-            <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" class="w-4 h-4 rounded">
-            <span>全選 / 全不選</span>
-          </label>
-          <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
-        </div>
-
-        <div id="statusBox" class="hidden bg-slate-800/90 p-3 rounded-xl border border-sky-500/30 flex items-center gap-3 text-xs">
-          <div class="animate-spin text-sky-400">⏳</div>
-          <span id="statusText" class="text-slate-200">準備檢測...</span>
-        </div>
-
+    <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
+      <div class="max-w-4xl mx-auto space-y-4">
+        <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 網頁連結速查儀表板</h1>
+        <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold">🚀 開始全選檢測</button>
+        <div id="statusBox" class="hidden text-xs text-sky-300">⏳ 處理中...</div>
         <div id="cardsContainer" class="space-y-3"></div>
-
       </div>
-
       <script>
         let targets = [];
-
-        async function loadTargets() {
-          try {
-            const res = await fetch('/api/targets');
-            targets = await res.json();
-            renderCards();
-          } catch(e) {}
-        }
-
-        function renderCards() {
+        async function init() {
+          const res = await fetch('/api/targets');
+          targets = await res.json();
           const container = document.getElementById('cardsContainer');
-          container.innerHTML = '';
-          let count = 0;
-
-          targets.forEach(item => {
-            if(item.enabled) count++;
-            const card = document.createElement('div');
-            card.id = 'card-' + item.id;
-            card.className = "bg-slate-800 rounded-xl p-4 border border-slate-700/80 space-y-3 shadow-md";
-            card.innerHTML = \`
-              <div class="flex items-start justify-between gap-3">
-                <label class="flex items-start gap-3 cursor-pointer flex-1">
-                  <input type="checkbox" onchange="syncCheckboxState()" class="target-checkbox w-5 h-5 rounded mt-0.5" data-id="\${item.id}" \${item.enabled ? 'checked' : ''}>
-                  <div>
-                    <h3 class="font-bold text-sm text-slate-100">\${item.name}</h3>
-                    <p class="text-xs text-slate-400 break-all line-clamp-1 mt-0.5">\${item.url}</p>
-                  </div>
-                </label>
+          container.innerHTML = targets.map(t => \`
+            <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+              <h3 class="font-bold">\${t.name}</h3>
+              <p class="text-xs text-slate-400 break-all">\${t.url}</p>
+              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
+                <div class="bg-slate-900 p-2 rounded">連線狀態: <span class="status-val font-bold">⚪ 未測</span></div>
+                <div class="bg-slate-900 p-2 rounded">UTM參數: <span class="utm-val font-bold">⚪ 未測</span></div>
+                <div class="bg-slate-900 p-2 rounded">GA4代碼: <span class="ga-val font-bold">⚪ 未測</span></div>
               </div>
-              <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-700/50 text-center text-xs">
-                <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">連線狀態</span>
-                  <span class="status-http font-medium text-slate-400">⚪ 未檢測</span>
-                </div>
-                <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">UTM參數</span>
-                  <span class="status-campaign font-medium text-slate-400">⚪ 未檢測</span>
-                </div>
-                <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">GA4代碼</span>
-                  <span class="status-ga4 font-medium text-slate-400">⚪ 未檢測</span>
-                </div>
-              </div>
-            \`;
-            container.appendChild(card);
-          });
-          document.getElementById('selectedCount').textContent = \`已勾選: \${count}\`;
+            </div>
+          \`).join('');
         }
-
-        async function syncCheckboxState() {
-          const checkboxes = document.querySelectorAll('.target-checkbox:checked');
-          const selectedIds = Array.from(checkboxes).map(cb => cb.dataset.id);
-          document.getElementById('selectedCount').textContent = \`已勾選: \${selectedIds.length}\`;
-          await fetch('/api/targets/toggle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ids: selectedIds })
-          });
-        }
-
-        function toggleSelectAll(master) {
-          document.querySelectorAll('.target-checkbox').forEach(cb => cb.checked = master.checked);
-          syncCheckboxState();
-        }
-
-        async function runSelectedTest() {
-          const checkboxes = document.querySelectorAll('.target-checkbox:checked');
-          const selectedIds = Array.from(checkboxes).map(cb => cb.dataset.id);
-
-          if (selectedIds.length === 0) return alert('請先勾選項目！');
-
-          const btn = document.getElementById('startBtn');
-          const statusBox = document.getElementById('statusBox');
-          const statusText = document.getElementById('statusText');
-          
-          btn.disabled = true;
-          statusBox.classList.remove('hidden');
-
-          for (let i = 0; i < selectedIds.length; i++) {
-            const id = selectedIds[i];
-            const targetItem = targets.find(t => t.id === id);
-            
-            statusText.textContent = \`[\${i + 1}/\${selectedIds.length}] 正在檢測: \${targetItem.name}...\`;
-
-            const card = document.getElementById('card-' + id);
-            if (card) {
-              card.querySelector('.status-http').innerHTML = '⏳ 檢測中';
-              card.querySelector('.status-campaign').innerHTML = '⏳ 檢測中';
-              card.querySelector('.status-ga4').innerHTML = '⏳ 檢測中';
+        function runTest() {
+          const evtSource = new EventSource('/api/run-test?ids=' + targets.map(t=>t.id).join(','));
+          evtSource.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            if (data.type === 'result') {
+              const r = data.data;
+              const card = document.getElementById('card-' + r.id);
+              card.querySelector('.status-val').textContent = r.statusText;
+              card.querySelector('.utm-val').textContent = r.utmKept;
+              card.querySelector('.ga-val').textContent = r.ga4Exist;
+            } else if (data.type === 'done') {
+              evtSource.close();
             }
-
-            try {
-              const res = await fetch('/api/run-single', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
-              });
-
-              const r = await res.json();
-
-              if (card && !r.error) {
-                card.querySelector('.status-http').innerHTML = r.statusOk ? '<span class="text-emerald-400 font-bold">✅ 正常(200)</span>' : '<span class="text-rose-400 font-bold">❌ 異常</span>';
-                card.querySelector('.status-campaign').innerHTML = r.campaign ? '<span class="text-emerald-400 font-bold">✅ 保留</span>' : '<span class="text-amber-400 font-bold">⚠️ 遺失</span>';
-                card.querySelector('.status-ga4').innerHTML = r.ga4Script ? '<span class="text-emerald-400 font-bold">✅ 存在</span>' : '<span class="text-rose-400 font-bold">❌ 缺失</span>';
-              } else if (card) {
-                card.querySelector('.status-http').innerHTML = '<span class="text-rose-400 font-bold">❌ 連線失敗</span>';
-                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ --</span>';
-                card.querySelector('.status-ga4').innerHTML = '<span class="text-slate-500">⚪ --</span>';
-              }
-            } catch (e) {
-              if (card) {
-                card.querySelector('.status-http').innerHTML = '<span class="text-rose-400 font-bold">❌ 連線失敗</span>';
-                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ --</span>';
-                card.querySelector('.status-ga4').innerHTML = '<span class="text-slate-500">⚪ --</span>';
-              }
-            }
-          }
-
-          btn.disabled = false;
-          statusText.textContent = '✨ 勾選項目檢測完成！';
+          };
         }
-
-        loadTargets();
+        init();
       </script>
     </body>
     </html>
