@@ -1,6 +1,5 @@
 const express = require('express');
 const { chromium } = require('playwright');
-const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -41,28 +40,35 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (ComputerDesk)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: false }
 ];
 
-let isRunning = false;
-
 const COOKIE_SELECTORS = [
   'button:has-text("同意接受全部")',
-  'a:has-text("同意接受全部")',
   '#onetrust-accept-btn-handler',
-  'button:has-text("接受所有 Cookie")',
-  'button:has-text("同意全部")'
+  'button:has-text("接受所有 Cookie")'
 ];
 
 async function testSingleItem(item) {
   let browser;
   try {
+    // 記憶體極限優化參數
     browser = await chromium.launch({ 
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process'
+      ] 
     });
     
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
       viewport: { width: 390, height: 844 }
     });
+
+    // 封鎖圖片與 CSS 以極速載入並省記憶體
+    await context.route('**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}', route => route.abort());
     
     const page = await context.newPage();
     let expCampaign = "";
@@ -80,20 +86,19 @@ async function testSingleItem(item) {
     });
 
     try {
-      await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(2000);
+      await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
       for (const selector of COOKIE_SELECTORS) {
         try {
           const btn = page.locator(selector).first();
-          if (await btn.isVisible({ timeout: 1500 })) {
+          if (await btn.isVisible({ timeout: 1000 })) {
             await btn.click({ force: true });
             clickedCookie = true;
             break;
           }
         } catch (e) {}
       }
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1500);
     } catch (e) {}
 
     const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
@@ -146,7 +151,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
           <div>
             <h1 class="text-xl font-bold text-sky-400">📊 GA4 UTM 監測儀表板</h1>
-            <p class="text-xs text-slate-400">雲端正式穩定版</p>
+            <p class="text-xs text-slate-400">輕量化正式版</p>
           </div>
           <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-5 py-2.5 rounded-lg w-full sm:w-auto shadow-lg">
             🚀 執行測試
@@ -174,9 +179,11 @@ app.get('/', (req, res) => {
         let targets = [];
 
         async function loadTargets() {
-          const res = await fetch('/api/targets');
-          targets = await res.json();
-          renderCards();
+          try {
+            const res = await fetch('/api/targets');
+            targets = await res.json();
+            renderCards();
+          } catch(e) {}
         }
 
         function renderCards() {
@@ -256,17 +263,23 @@ app.get('/', (req, res) => {
 
             const card = document.getElementById('card-' + id);
             if (card) {
-              card.querySelector('.status-cookie').innerHTML = '⏳ 檢測中';
-              card.querySelector('.status-pv').innerHTML = '⏳ 檢測中';
-              card.querySelector('.status-campaign').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-cookie').innerHTML = '⏳';
+              card.querySelector('.status-pv').innerHTML = '⏳';
+              card.querySelector('.status-campaign').innerHTML = '⏳';
             }
 
             try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 18000); // 18 秒強制斷開避免阻塞
+
               const res = await fetch('/api/run-single', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
+                body: JSON.stringify({ id }),
+                signal: controller.signal
               });
+              clearTimeout(timeoutId);
+
               const r = await res.json();
 
               if (card && !r.error) {
@@ -277,12 +290,14 @@ app.get('/', (req, res) => {
                 card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
               }
             } catch (e) {
-              console.error(e);
+              if (card) {
+                card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
+              }
             }
           }
 
           btn.disabled = false;
-          statusText.textContent = '✨ 勾選項目檢測完成！';
+          statusText.textContent = '✨ 檢測完成！';
         }
 
         loadTargets();
