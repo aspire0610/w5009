@@ -40,7 +40,6 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// 擬真瀏覽器請求頭（防止被 Cloudflare / 防火牆攔截 403）
 const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -60,7 +59,6 @@ async function checkUrl(item) {
     const finalUrl = response.url;
     const htmlText = await response.text();
 
-    // 1. UTM 參數檢查
     let hasUtm = false;
     try {
       const originalParams = new URL(item.url).searchParams;
@@ -76,7 +74,6 @@ async function checkUrl(item) {
       hasUtm = false;
     }
 
-    // 2. 多重條件 GA4 / GTM / dataLayer 比對
     const hasGa4MeasurementId = /G-[A-Z0-9]{8,12}/i.test(htmlText);
     const hasGtmContainer = /GTM-[A-Z0-9]{4,10}/i.test(htmlText);
     const hasGoogleScript = /googletagmanager|google-analytics|gtag/i.test(htmlText);
@@ -142,19 +139,35 @@ app.get('/', (req, res) => {
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
       <div class="max-w-4xl mx-auto space-y-4">
-        <div class="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速查儀表板</h1>
-            <p class="text-xs text-slate-400">免瀏覽器·超高速API版</p>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速儀表板</h1>
+            <p class="text-xs text-slate-400">免瀏覽器版</p>
           </div>
-          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20">🚀 執行測試</button>
+          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
         </div>
 
-        <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 flex justify-between items-center">
+        <!-- 選項與自動定時控制列 -->
+        <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 flex flex-wrap justify-between items-center gap-3">
           <label class="flex items-center space-x-2 text-sm font-medium cursor-pointer">
             <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" checked class="w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700">
             <span>全選 / 全不選</span>
           </label>
+
+          <div class="flex items-center space-x-3 text-xs bg-slate-900/60 p-1.5 rounded-lg border border-slate-700/60">
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-3.5 h-3.5 rounded text-sky-500 bg-slate-900 border-slate-700">
+              <span class="text-slate-300 font-medium">🔄 自動輪詢</span>
+            </label>
+            <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-slate-200 rounded border border-slate-700 px-1.5 py-0.5 outline-none text-xs">
+              <option value="5">每 5 分鐘</option>
+              <option value="15">每 15 分鐘</option>
+              <option value="30" selected>每 30 分鐘</option>
+              <option value="60">每 1 小時</option>
+            </select>
+            <span id="countdownText" class="text-sky-400 hidden font-mono"></span>
+          </div>
+
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
         </div>
 
@@ -164,6 +177,9 @@ app.get('/', (req, res) => {
 
       <script>
         let targets = [];
+        let autoTimer = null;
+        let countdownTimer = null;
+        let remainingSeconds = 0;
 
         async function init() {
           const res = await fetch('/api/targets');
@@ -211,6 +227,51 @@ app.get('/', (req, res) => {
           document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
         }
 
+        function toggleAutoCheck() {
+          const enabled = document.getElementById('autoCheckToggle').checked;
+          const countdownText = document.getElementById('countdownText');
+
+          if (enabled) {
+            countdownText.classList.remove('hidden');
+            startAutoTimer();
+          } else {
+            countdownText.classList.add('hidden');
+            clearInterval(autoTimer);
+            clearInterval(countdownTimer);
+          }
+        }
+
+        function updateAutoCheckInterval() {
+          if (document.getElementById('autoCheckToggle').checked) {
+            startAutoTimer();
+          }
+        }
+
+        function startAutoTimer() {
+          clearInterval(autoTimer);
+          clearInterval(countdownTimer);
+
+          const minutes = parseInt(document.getElementById('intervalSelect').value, 10);
+          remainingSeconds = minutes * 60;
+
+          updateCountdownDisplay();
+
+          countdownTimer = setInterval(() => {
+            remainingSeconds--;
+            if (remainingSeconds <= 0) {
+              remainingSeconds = minutes * 60;
+              runTest();
+            }
+            updateCountdownDisplay();
+          }, 1000);
+        }
+
+        function updateCountdownDisplay() {
+          const m = Math.floor(remainingSeconds / 60);
+          const s = remainingSeconds % 60;
+          document.getElementById('countdownText').textContent = \`(\${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')} 後刷新)\`;
+        }
+
         function runTest() {
           const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
           if (selected.length === 0) return alert('請至少勾選一個項目！');
@@ -244,7 +305,7 @@ app.get('/', (req, res) => {
               gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
             } else if (data.type === 'done') {
               evtSource.close();
-              statusBox.textContent = '✨ 勾選項目檢測完成！';
+              statusBox.textContent = '✨ 檢測完成！(' + new Date().toLocaleTimeString() + ')';
               startBtn.disabled = false;
               startBtn.classList.remove('opacity-50');
             }
