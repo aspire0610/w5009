@@ -42,7 +42,6 @@ let targetList = [
 ];
 
 let isRunning = false;
-let cronTask = null;
 
 const COOKIE_SELECTORS = [
   'button:has-text("同意接受全部")',
@@ -52,91 +51,64 @@ const COOKIE_SELECTORS = [
   'button:has-text("同意全部")'
 ];
 
-async function runAutoCheck(targetsToRun, onProgress) {
-  if (isRunning) return { status: 'busy' };
-  isRunning = true;
+async function testSingleItem(item) {
   let browser;
   try {
-    if (onProgress) onProgress('log', '啟動瀏覽器...');
     browser = await chromium.launch({ 
       headless: true,
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox', 
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled'
-      ] 
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+      viewport: { width: 390, height: 844 }
+    });
+    
+    const page = await context.newPage();
+    let expCampaign = "";
+    try { expCampaign = new URL(item.url).searchParams.get("utm_campaign") || ""; } catch(e){}
+    
+    let hasPageView = false, pageViewPayload = null, clickedCookie = false;
+
+    page.on('request', req => {
+      const u = req.url(), postData = req.postData() || '';
+      if ((u.includes('g/collect') || u.includes('google-analytics.com')) && 
+          (u.includes('en=page_view') || postData.includes('en=page_view'))) {
+        hasPageView = true; 
+        pageViewPayload = u + ' ' + postData;
+      }
     });
 
-    for (const [index, item] of targetsToRun.entries()) {
-      if (onProgress) onProgress('log', `[${index + 1}/${targetsToRun.length}] 檢測: ${item.name}`);
-      
-      const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-        viewport: { width: 390, height: 844 }
-      });
-      const page = await context.newPage();
-      let expCampaign = "";
-      try { expCampaign = new URL(item.url).searchParams.get("utm_campaign") || ""; } catch(e){}
-      
-      let hasPageView = false, pageViewPayload = null, clickedCookie = false;
+    try {
+      await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(2000);
 
-      page.on('request', req => {
-        const u = req.url(), postData = req.postData() || '';
-        if ((u.includes('g/collect') || u.includes('google-analytics.com')) && 
-            (u.includes('en=page_view') || postData.includes('en=page_view'))) {
-          hasPageView = true; 
-          pageViewPayload = u + ' ' + postData;
-        }
-      });
-
-      try {
-        await page.goto(item.url, { waitUntil: 'networkidle', timeout: 30000 });
-
-        for (const selector of COOKIE_SELECTORS) {
-          try {
-            const btn = page.locator(selector).first();
-            if (await btn.isVisible({ timeout: 2000 })) {
-              await btn.click({ force: true });
-              clickedCookie = true;
-              break;
-            }
-          } catch (e) {}
-        }
-        await page.waitForTimeout(3000);
-      } catch (e) {
-        if (onProgress) onProgress('log', `⚠️ 頁面載入逾時/異常: ${item.name}`);
+      for (const selector of COOKIE_SELECTORS) {
+        try {
+          const btn = page.locator(selector).first();
+          if (await btn.isVisible({ timeout: 1500 })) {
+            await btn.click({ force: true });
+            clickedCookie = true;
+            break;
+          }
+        } catch (e) {}
       }
+      await page.waitForTimeout(2500);
+    } catch (e) {}
 
-      const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
-      const resItem = { 
-        id: item.id, name: item.name, url: item.url, 
-        cookie: clickedCookie, pageView: hasPageView, campaign: hasCampaign, 
-        time: new Date().toLocaleTimeString() 
-      };
-      
-      if (onProgress) onProgress('result', resItem);
-      await context.close();
-    }
+    const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
+    await browser.close();
+
+    return { 
+      id: item.id, name: item.name, url: item.url, 
+      cookie: clickedCookie, pageView: hasPageView, campaign: hasCampaign, 
+      time: new Date().toLocaleTimeString() 
+    };
   } catch (err) {
-    if (onProgress) onProgress('log', `❌ 錯誤: ${err.message}`);
-  } finally {
     if (browser) await browser.close();
-    isRunning = false;
-    if (onProgress) onProgress('done', {});
+    return { id: item.id, error: err.message };
   }
 }
-
-function setupCron(minutes) {
-  if (cronTask) cronTask.stop();
-  cronTask = cron.schedule(`*/${minutes} * * * *`, () => {
-    const activeTargets = targetList.filter(t => t.enabled);
-    if (activeTargets.length > 0) {
-      runAutoCheck(activeTargets, () => {});
-    }
-  });
-}
-setupCron(30);
 
 app.use(express.json());
 app.get('/api/targets', (req, res) => res.json(targetList));
@@ -149,25 +121,13 @@ app.post('/api/targets/toggle', (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/set-interval', (req, res) => {
-  const { minutes } = req.body;
-  if (minutes > 0) {
-    setupCron(minutes);
-    res.json({ success: true });
-  }
-});
-
-app.post('/api/targets', (req, res) => {
-  const { name, url } = req.body;
-  if (!name || !url) return res.status(400).json({ error: '請輸入名稱與網址' });
-  const newItem = { id: Date.now().toString(), name, url, enabled: false };
-  targetList.push(newItem);
-  res.json({ success: true, item: newItem });
-});
-
-app.delete('/api/targets/:id', (req, res) => {
-  targetList = targetList.filter(t => t.id !== req.params.id);
-  res.json({ success: true });
+app.post('/api/run-single', async (req, res) => {
+  const { id } = req.body;
+  const item = targetList.find(t => t.id === id);
+  if (!item) return res.status(404).json({ error: '找不到該項目' });
+  
+  const result = await testSingleItem(item);
+  res.json(result);
 });
 
 app.get('/', (req, res) => {
@@ -183,25 +143,16 @@ app.get('/', (req, res) => {
     <body class="bg-slate-900 text-slate-100 min-h-screen pb-20">
       <div class="max-w-4xl mx-auto p-4 space-y-4">
         
-        <!-- Header -->
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
           <div>
             <h1 class="text-xl font-bold text-sky-400">📊 GA4 UTM 監測儀表板</h1>
-            <p class="text-xs text-slate-400">手機 / 桌上型電腦雙向適配</p>
+            <p class="text-xs text-slate-400">雲端正式穩定版</p>
           </div>
-          <div class="flex items-center gap-2 w-full sm:w-auto">
-            <select id="intervalSelect" onchange="updateInterval()" class="bg-slate-800 text-xs text-sky-300 rounded px-2 py-2 border border-slate-700 flex-1 sm:flex-none">
-              <option value="15">每 15 分</option>
-              <option value="30" selected>每 30 分</option>
-              <option value="60">每 1 小時</option>
-            </select>
-            <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-4 py-2 rounded-lg flex-1 sm:flex-none shadow-lg">
-              🚀 執行測試
-            </button>
-          </div>
+          <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-5 py-2.5 rounded-lg w-full sm:w-auto shadow-lg">
+            🚀 執行測試
+          </button>
         </div>
 
-        <!-- 全選控制列 -->
         <div class="flex items-center justify-between bg-slate-800 p-3 rounded-xl border border-slate-700">
           <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
             <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" class="w-4 h-4 rounded">
@@ -210,13 +161,11 @@ app.get('/', (req, res) => {
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
         </div>
 
-        <!-- 狀態顯示 -->
         <div id="statusBox" class="hidden bg-slate-800/90 p-3 rounded-xl border border-sky-500/30 flex items-center gap-3 text-xs">
           <div class="animate-spin text-sky-400">⏳</div>
           <span id="statusText" class="text-slate-200">準備檢測...</span>
         </div>
 
-        <!-- 網址清單 (手機端顯示卡片 / 電腦端顯示列表) -->
         <div id="cardsContainer" class="space-y-3"></div>
 
       </div>
@@ -249,7 +198,6 @@ app.get('/', (req, res) => {
                     <p class="text-xs text-slate-400 break-all line-clamp-1 mt-0.5">\${item.url}</p>
                   </div>
                 </label>
-                <button onclick="deleteTarget('\${item.id}')" class="text-xs text-rose-400 p-1">🗑️</button>
               </div>
               <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-700/50 text-center text-xs">
                 <div class="bg-slate-900/50 p-2 rounded-lg">
@@ -287,22 +235,7 @@ app.get('/', (req, res) => {
           syncCheckboxState();
         }
 
-        function updateInterval() {
-          const val = document.getElementById('intervalSelect').value;
-          fetch('/api/set-interval', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ minutes: parseInt(val) })
-          });
-        }
-
-        async function deleteTarget(id) {
-          if (!confirm('確定要刪除嗎？')) return;
-          await fetch('/api/targets/' + id, { method: 'DELETE' });
-          loadTargets();
-        }
-
-        function runSelectedTest() {
+        async function runSelectedTest() {
           const checkboxes = document.querySelectorAll('.target-checkbox:checked');
           const selectedIds = Array.from(checkboxes).map(cb => cb.dataset.id);
 
@@ -315,35 +248,41 @@ app.get('/', (req, res) => {
           btn.disabled = true;
           statusBox.classList.remove('hidden');
 
-          selectedIds.forEach(id => {
+          for (let i = 0; i < selectedIds.length; i++) {
+            const id = selectedIds[i];
+            const targetItem = targets.find(t => t.id === id);
+            
+            statusText.textContent = \`[\${i + 1}/\${selectedIds.length}] 正在檢測: \${targetItem.name}...\`;
+
             const card = document.getElementById('card-' + id);
             if (card) {
-              card.querySelector('.status-cookie').innerHTML = '⏳';
-              card.querySelector('.status-pv').innerHTML = '⏳';
-              card.querySelector('.status-campaign').innerHTML = '⏳';
+              card.querySelector('.status-cookie').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-pv').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-campaign').innerHTML = '⏳ 檢測中';
             }
-          });
 
-          const evtSource = new EventSource('/api/run-test?ids=' + selectedIds.join(','));
-          
-          evtSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            if (data.type === 'log') {
-              statusText.textContent = data.message;
-            } else if (data.type === 'result') {
-              const r = data.data;
-              const card = document.getElementById('card-' + r.id);
-              if (card) {
+            try {
+              const res = await fetch('/api/run-single', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+              });
+              const r = await res.json();
+
+              if (card && !r.error) {
                 card.querySelector('.status-cookie').innerHTML = r.cookie ? '<span class="text-emerald-400 font-bold">✅ 已同意</span>' : '<span class="text-slate-500">⚪ 無彈窗</span>';
                 card.querySelector('.status-pv').innerHTML = r.pageView ? '<span class="text-emerald-400 font-bold">✅ 成功</span>' : '<span class="text-rose-400 font-bold">❌ 失敗</span>';
                 card.querySelector('.status-campaign').innerHTML = r.campaign ? '<span class="text-emerald-400 font-bold">✅ 帶入</span>' : '<span class="text-amber-400 font-bold">⚠️ 無參數</span>';
+              } else if (card) {
+                card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
               }
-            } else if (data.type === 'done') {
-              evtSource.close();
-              btn.disabled = false;
-              statusText.textContent = '✨ 檢測完成！';
+            } catch (e) {
+              console.error(e);
             }
-          };
+          }
+
+          btn.disabled = false;
+          statusText.textContent = '✨ 勾選項目檢測完成！';
         }
 
         loadTargets();
@@ -353,26 +292,4 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.get('/api/run-test', (req, res) => {
-  const ids = req.query.ids ? req.query.ids.split(',') : [];
-  const selectedTargets = targetList.filter(t => ids.includes(t.id));
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-
-  const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
-
-  runAutoCheck(selectedTargets, (type, data) => {
-    if (type === 'log') sendEvent('log', { message: data });
-    else if (type === 'result') sendEvent('result', { data });
-    else if (type === 'done') {
-      sendEvent('done', {});
-      res.end();
-    }
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`🚀 伺服器運作中！連接埠: ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
