@@ -18,6 +18,7 @@ async function getBrowser() {
   if (!browserInstance) {
     browserInstance = await puppeteer.launch({
       headless: "new",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // 抓取容器內部的 Chromium
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
   }
