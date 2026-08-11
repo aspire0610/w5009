@@ -4,10 +4,11 @@ const PORT = process.env.PORT || 3000;
 
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
-  { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true }
+  { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true },
+  { id: "3", name: "Rollout 家具海報", url: "https://www.costco.com.tw/content/showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=Poster-FurnitureRollOut", enabled: true }
 ];
 
-// 擬真瀏覽器請求頭（防止被 Cloudflare / 防火牆攔截 403）
+// 擬真瀏覽器請求標頭（避免被 Cloudflare / 防火牆阻檔）
 const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -27,7 +28,7 @@ async function checkUrl(item) {
     const finalUrl = response.url;
     const htmlText = await response.text();
 
-    // 1. UTM 參數檢查：檢查轉址後的 URL 是否還保留原始 utm 參數
+    // 1. UTM 參數檢查：檢查轉址後是否保有 utm 參數
     let hasUtm = false;
     try {
       const originalParams = new URL(item.url).searchParams;
@@ -43,12 +44,17 @@ async function checkUrl(item) {
       hasUtm = false;
     }
 
-    // 2. GA4 / GTM 深入比對（涵蓋 Inline GA4, GTM 容器, gtag.js）
+    // 2. 廣域 GA4 / GTM / dataLayer 關鍵字比對
     const hasGa4MeasurementId = /G-[A-Z0-9]{8,12}/i.test(htmlText);
     const hasGtmContainer = /GTM-[A-Z0-9]{4,10}/i.test(htmlText);
-    const hasGoogleTagScript = htmlText.includes('googletagmanager.com/gtag/js') || htmlText.includes('google-analytics.com');
+    const hasGoogleScript = /googletagmanager|google-analytics|gtag/i.test(htmlText);
+    const hasDataLayer = /dataLayer/i.test(htmlText);
 
-    const ga4Detected = hasGa4MeasurementId || hasGtmContainer || hasGoogleTagScript;
+    // 只要符合任何一項追蹤跡象即認定為存在
+    const ga4Detected = hasGa4MeasurementId || hasGtmContainer || hasGoogleScript || hasDataLayer;
+
+    // 後台 Console 輸出排查 Log
+    console.log(`[${item.name}] 長度: ${htmlText.length} | GA4-ID: ${hasGa4MeasurementId} | GTM: ${hasGtmContainer} | Script: ${hasGoogleScript} | dataLayer: ${hasDataLayer}`);
 
     return {
       id: item.id,
@@ -57,9 +63,10 @@ async function checkUrl(item) {
       status: response.status,
       statusText: statusOk ? '正常(200)' : `異常(${response.status})`,
       utmKept: hasUtm ? '保留' : '丟失/未帶入',
-      ga4Exist: ga4Detected ? '存在' : '未發現'
+      ga4Exist: ga4Detected ? '存在' : '缺失'
     };
   } catch (error) {
+    console.error(`[${item.name}] 檢測連線失敗:`, error.message);
     return {
       id: item.id,
       name: item.name,
@@ -108,44 +115,122 @@ app.get('/', (req, res) => {
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
       <div class="max-w-4xl mx-auto space-y-4">
-        <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 網頁連結速查儀表板</h1>
-        <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold">🚀 開始全選檢測</button>
-        <div id="statusBox" class="hidden text-xs text-sky-300">⏳ 處理中...</div>
+        <div class="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
+          <div>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 網頁連結速查儀表板</h1>
+            <p class="text-xs text-slate-400">免瀏覽器·超高速 API 版</p>
+          </div>
+          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20">🚀 執行測試</button>
+        </div>
+
+        <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 flex justify-between items-center">
+          <label class="flex items-center space-x-2 text-sm font-medium cursor-pointer">
+            <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" checked class="w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700">
+            <span>全選 / 全不選</span>
+          </label>
+          <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
+        </div>
+
+        <div id="statusBox" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 text-xs text-sky-300">⏳ 處理中...</div>
         <div id="cardsContainer" class="space-y-3"></div>
       </div>
+
       <script>
         let targets = [];
+
         async function init() {
           const res = await fetch('/api/targets');
           targets = await res.json();
+          renderCards();
+          updateCount();
+        }
+
+        function renderCards() {
           const container = document.getElementById('cardsContainer');
           container.innerHTML = targets.map(t => \`
-            <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-              <h3 class="font-bold">\${t.name}</h3>
-              <p class="text-xs text-slate-400 break-all">\${t.url}</p>
-              <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
-                <div class="bg-slate-900 p-2 rounded">連線狀態: <span class="status-val font-bold">⚪ 未測</span></div>
-                <div class="bg-slate-900 p-2 rounded">UTM參數: <span class="utm-val font-bold">⚪ 未測</span></div>
-                <div class="bg-slate-900 p-2 rounded">GA4代碼: <span class="ga-val font-bold">⚪ 未測</span></div>
+            <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
+              <div class="flex items-start space-x-3">
+                <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount()">
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-bold text-base text-slate-100">\${t.name}</h3>
+                  <p class="text-xs text-slate-400 truncate">\${t.url}</p>
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-2 text-center text-xs">
+                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                  <div class="text-slate-400 mb-1">連線狀態</div>
+                  <span class="status-val font-bold text-slate-300">⚪ 未測</span>
+                </div>
+                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                  <div class="text-slate-400 mb-1">UTM參數</div>
+                  <span class="utm-val font-bold text-slate-300">⚪ 未測</span>
+                </div>
+                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                  <div class="text-slate-400 mb-1">GA4代碼</div>
+                  <span class="ga-val font-bold text-slate-300">⚪ 未測</span>
+                </div>
               </div>
             </div>
           \`).join('');
         }
+
+        function toggleSelectAll(master) {
+          document.querySelectorAll('.target-checkbox').forEach(cb => cb.checked = master.checked);
+          updateCount();
+        }
+
+        function updateCount() {
+          const checked = document.querySelectorAll('.target-checkbox:checked').length;
+          document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
+        }
+
         function runTest() {
-          const evtSource = new EventSource('/api/run-test?ids=' + targets.map(t=>t.id).join(','));
+          const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
+          if (selected.length === 0) return alert('請至少勾選一個項目！');
+
+          const startBtn = document.getElementById('startBtn');
+          const statusBox = document.getElementById('statusBox');
+          startBtn.disabled = true;
+          startBtn.classList.add('opacity-50');
+          statusBox.classList.remove('hidden');
+
+          const evtSource = new EventSource('/api/run-test?ids=' + selected.join(','));
+
           evtSource.onmessage = (e) => {
             const data = JSON.parse(e.data);
-            if (data.type === 'result') {
+            if (data.type === 'log') {
+              statusBox.textContent = \`⏳ \${data.message}\`;
+            } else if (data.type === 'result') {
               const r = data.data;
               const card = document.getElementById('card-' + r.id);
-              card.querySelector('.status-val').textContent = r.statusText;
-              card.querySelector('.utm-val').textContent = r.utmKept;
-              card.querySelector('.ga-val').textContent = r.ga4Exist;
+              
+              const statusEl = card.querySelector('.status-val');
+              statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
+              statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
+
+              const utmEl = card.querySelector('.utm-val');
+              utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
+              utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
+
+              const gaEl = card.querySelector('.ga-val');
+              gaEl.textContent = r.ga4Exist === '存在' ? '✅ 存在' : '❌ 缺失';
+              gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
             } else if (data.type === 'done') {
               evtSource.close();
+              statusBox.textContent = '✨ 勾選項目檢測完成！';
+              startBtn.disabled = false;
+              startBtn.classList.remove('opacity-50');
             }
           };
+
+          evtSource.onerror = () => {
+            evtSource.close();
+            statusBox.textContent = '❌ 連線中斷';
+            startBtn.disabled = false;
+            startBtn.classList.remove('opacity-50');
+          };
         }
+
         init();
       </script>
     </body>
