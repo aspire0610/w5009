@@ -146,26 +146,6 @@ app.get('/', (req, res) => {
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
         </div>
 
-        <!-- 數據統計儀表板 -->
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs">
-          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
-            <div class="text-slate-400 mb-1">累積測試輪次</div>
-            <span id="statRounds" class="text-lg font-extrabold text-sky-400">0</span>
-          </div>
-          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
-            <div class="text-slate-400 mb-1">累積檢測總項</div>
-            <span id="statTotalChecks" class="text-lg font-extrabold text-slate-200">0</span>
-          </div>
-          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
-            <div class="text-slate-400 mb-1">成功通過項</div>
-            <span id="statSuccessCount" class="text-lg font-extrabold text-emerald-400">0</span>
-          </div>
-          <div class="bg-slate-800 p-3 rounded-xl border border-slate-700">
-            <div class="text-slate-400 mb-1">異常/缺失項</div>
-            <span id="statFailCount" class="text-lg font-extrabold text-rose-400">0</span>
-          </div>
-        </div>
-
         <!-- 選項與自動定時控制列 -->
         <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 flex flex-wrap justify-between items-center gap-3">
           <label class="flex items-center space-x-2 text-sm font-medium cursor-pointer">
@@ -202,10 +182,8 @@ app.get('/', (req, res) => {
         let countdownTimer = null;
         let remainingSeconds = 0;
 
-        let totalRounds = 0;
-        let totalChecks = 0;
-        let totalSuccess = 0;
-        let totalFail = 0;
+        // 儲存每個網址項目的獨立統計資料 (key: target.id)
+        let itemStats = {};
 
         async function init() {
           const res = await fetch('/api/targets');
@@ -219,13 +197,23 @@ app.get('/', (req, res) => {
           const container = document.getElementById('cardsContainer');
           container.innerHTML = targets.map(t => \`
             <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
-              <div class="flex items-start space-x-3">
-                <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount()">
-                <div class="flex-1 min-w-0">
-                  <h3 class="font-bold text-base text-slate-100">\${t.name}</h3>
-                  <p class="text-xs text-slate-400 truncate">\${t.url}</p>
+              <div class="flex items-start justify-between space-x-3 gap-2">
+                <div class="flex items-start space-x-3 min-w-0 flex-1">
+                  <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount()">
+                  <div class="min-w-0 flex-1">
+                    <h3 class="font-bold text-base text-slate-100 truncate">\${t.name}</h3>
+                    <p class="text-xs text-slate-400 truncate">\${t.url}</p>
+                  </div>
+                </div>
+
+                <!-- 單一網址獨立累計次數標籤 -->
+                <div class="text-right text-xs shrink-0 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 font-mono">
+                  <span class="text-slate-400">已測: </span>
+                  <span class="card-total-count font-bold text-sky-400">0</span> 次
+                  <span class="text-slate-500 ml-1">(<span class="card-success-count text-emerald-400">0</span> 成功 / <span class="card-fail-count text-rose-400">0</span> 失敗)</span>
                 </div>
               </div>
+
               <div class="grid grid-cols-3 gap-2 text-center text-xs">
                 <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
                   <div class="text-slate-400 mb-1">連線狀態</div>
@@ -304,13 +292,6 @@ app.get('/', (req, res) => {
           countdownText.className = 'text-amber-400 font-mono font-bold';
         }
 
-        function updateStatsUI() {
-          document.getElementById('statRounds').textContent = totalRounds;
-          document.getElementById('statTotalChecks').textContent = totalChecks;
-          document.getElementById('statSuccessCount').textContent = totalSuccess;
-          document.getElementById('statFailCount').textContent = totalFail;
-        }
-
         function runTest() {
           const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
           if (selected.length === 0) return alert('請至少勾選一個項目！');
@@ -321,9 +302,6 @@ app.get('/', (req, res) => {
           startBtn.classList.add('opacity-50');
           statusBox.classList.remove('hidden');
 
-          totalRounds++;
-          updateStatsUI();
-
           const evtSource = new EventSource('/api/run-test?ids=' + selected.join(','));
 
           evtSource.onmessage = (e) => {
@@ -333,28 +311,39 @@ app.get('/', (req, res) => {
             } else if (data.type === 'result') {
               const r = data.data;
               const card = document.getElementById('card-' + r.id);
-              
+
+              // 初始化或更新該網址專屬的數據
+              if (!itemStats[r.id]) {
+                itemStats[r.id] = { total: 0, success: 0, fail: 0 };
+              }
+
               const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
               
-              totalChecks++;
+              itemStats[r.id].total++;
               if (isPass) {
-                totalSuccess++;
+                itemStats[r.id].success++;
               } else {
-                totalFail++;
+                itemStats[r.id].fail++;
               }
-              updateStatsUI();
 
-              const statusEl = card.querySelector('.status-val');
-              statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
-              statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
+              // 更新該網址卡片右上角的數字
+              if (card) {
+                card.querySelector('.card-total-count').textContent = itemStats[r.id].total;
+                card.querySelector('.card-success-count').textContent = itemStats[r.id].success;
+                card.querySelector('.card-fail-count').textContent = itemStats[r.id].fail;
 
-              const utmEl = card.querySelector('.utm-val');
-              utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
-              utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
+                const statusEl = card.querySelector('.status-val');
+                statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
+                statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
 
-              const gaEl = card.querySelector('.ga-val');
-              gaEl.textContent = r.ga4Exist === '存在' ? '✅ 存在' : '❌ 缺失';
-              gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
+                const utmEl = card.querySelector('.utm-val');
+                utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
+                utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
+
+                const gaEl = card.querySelector('.ga-val');
+                gaEl.textContent = r.ga4Exist === '存在' ? '✅ 存在' : '❌ 缺失';
+                gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
+              }
             } else if (data.type === 'done') {
               evtSource.close();
               statusBox.textContent = '✨ 檢測完成！(' + new Date().toLocaleTimeString() + ')';
