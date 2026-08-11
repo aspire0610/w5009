@@ -1,5 +1,4 @@
 const express = require('express');
-const { chromium } = require('playwright');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -40,74 +39,44 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (ComputerDesk)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: false }
 ];
 
-const COOKIE_SELECTORS = [
-  'button:has-text("同意接受全部")',
-  '#onetrust-accept-btn-handler',
-  'button:has-text("接受所有 Cookie")'
-];
-
 async function testSingleItem(item) {
-  let browser;
   try {
-    browser = await chromium.launch({ 
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled'
-      ] 
-    });
-    
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      locale: 'zh-TW',
-      extraHTTPHeaders: {
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
-      }
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000); // 6秒連線逾時
 
-    const page = await context.newPage();
+    const response = await fetch(item.url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    const html = await response.text();
+    const finalUrl = response.url;
+    
+    // 解析 UTM
     let expCampaign = "";
     try { expCampaign = new URL(item.url).searchParams.get("utm_campaign") || ""; } catch(e){}
-    
-    let hasPageView = false, pageViewPayload = null, clickedCookie = false;
 
-    page.on('request', req => {
-      const u = req.url(), postData = req.postData() || '';
-      if ((u.includes('g/collect') || u.includes('google-analytics.com')) && 
-          (u.includes('en=page_view') || postData.includes('en=page_view'))) {
-        hasPageView = true; 
-        pageViewPayload = u + ' ' + postData;
-      }
-    });
+    // 檢查 1: HTTP 狀態碼
+    const isStatusOk = response.status >= 200 && response.status < 400;
 
-    try {
-      await page.goto(item.url, { waitUntil: 'commit', timeout: 15000 });
+    // 檢查 2: UTM 是否保存在最終 URL
+    const hasCampaignInUrl = expCampaign ? finalUrl.includes(expCampaign) : false;
 
-      for (const selector of COOKIE_SELECTORS) {
-        try {
-          const btn = page.locator(selector).first();
-          if (await btn.isVisible({ timeout: 1000 })) {
-            await btn.click({ force: true });
-            clickedCookie = true;
-            break;
-          }
-        } catch (e) {}
-      }
-      await page.waitForTimeout(3000);
-    } catch (e) {}
-
-    const hasCampaign = (expCampaign && pageViewPayload) ? pageViewPayload.includes(expCampaign) : false;
-    await browser.close();
+    // 檢查 3: 網頁 HTML 中是否包含 GA / GTM 追蹤碼片段
+    const hasGA4Script = html.includes('GTM-') || html.includes('gtag') || html.includes('google-analytics.com');
 
     return { 
       id: item.id, name: item.name, url: item.url, 
-      cookie: clickedCookie, pageView: hasPageView, campaign: hasCampaign, 
+      statusOk: isStatusOk, campaign: hasCampaignInUrl, ga4Script: hasGA4Script,
       time: new Date().toLocaleTimeString() 
     };
   } catch (err) {
-    if (browser) await browser.close();
     return { id: item.id, error: err.message };
   }
 }
@@ -139,7 +108,7 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>UTM & GA4 自動檢測儀表板</title>
+      <title>UTM & 網頁連結速查儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen pb-20">
@@ -147,8 +116,8 @@ app.get('/', (req, res) => {
         
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">📊 GA4 UTM 監測儀表板</h1>
-            <p class="text-xs text-slate-400">抗阻擋穩定版</p>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 連結輕量速查儀表板</h1>
+            <p class="text-xs text-slate-400">免瀏覽器·超高速API版</p>
           </div>
           <button onclick="runSelectedTest()" id="startBtn" class="bg-sky-500 active:bg-sky-600 text-white font-bold text-xs px-5 py-2.5 rounded-lg w-full sm:w-auto shadow-lg">
             🚀 執行測試
@@ -205,16 +174,16 @@ app.get('/', (req, res) => {
               </div>
               <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-700/50 text-center text-xs">
                 <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">Cookie</span>
-                  <span class="status-cookie font-medium text-slate-400">⚪ 未檢測</span>
+                  <span class="block text-[10px] text-slate-400 mb-1">連線狀態</span>
+                  <span class="status-http font-medium text-slate-400">⚪ 未檢測</span>
                 </div>
                 <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">Page View</span>
-                  <span class="status-pv font-medium text-slate-400">⚪ 未檢測</span>
-                </div>
-                <div class="bg-slate-900/50 p-2 rounded-lg">
-                  <span class="block text-[10px] text-slate-400 mb-1">Campaign</span>
+                  <span class="block text-[10px] text-slate-400 mb-1">UTM參數</span>
                   <span class="status-campaign font-medium text-slate-400">⚪ 未檢測</span>
+                </div>
+                <div class="bg-slate-900/50 p-2 rounded-lg">
+                  <span class="block text-[10px] text-slate-400 mb-1">GA4代碼</span>
+                  <span class="status-ga4 font-medium text-slate-400">⚪ 未檢測</span>
                 </div>
               </div>
             \`;
@@ -260,9 +229,9 @@ app.get('/', (req, res) => {
 
             const card = document.getElementById('card-' + id);
             if (card) {
-              card.querySelector('.status-cookie').innerHTML = '⏳ 檢測中';
-              card.querySelector('.status-pv').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-http').innerHTML = '⏳ 檢測中';
               card.querySelector('.status-campaign').innerHTML = '⏳ 檢測中';
+              card.querySelector('.status-ga4').innerHTML = '⏳ 檢測中';
             }
 
             try {
@@ -275,19 +244,19 @@ app.get('/', (req, res) => {
               const r = await res.json();
 
               if (card && !r.error) {
-                card.querySelector('.status-cookie').innerHTML = r.cookie ? '<span class="text-emerald-400 font-bold">✅ 已同意</span>' : '<span class="text-slate-500">⚪ 無彈窗</span>';
-                card.querySelector('.status-pv').innerHTML = r.pageView ? '<span class="text-emerald-400 font-bold">✅ 成功</span>' : '<span class="text-rose-400 font-bold">❌ 失敗</span>';
-                card.querySelector('.status-campaign').innerHTML = r.campaign ? '<span class="text-emerald-400 font-bold">✅ 帶入</span>' : '<span class="text-amber-400 font-bold">⚠️ 無參數</span>';
+                card.querySelector('.status-http').innerHTML = r.statusOk ? '<span class="text-emerald-400 font-bold">✅ 正常(200)</span>' : '<span class="text-rose-400 font-bold">❌ 異常</span>';
+                card.querySelector('.status-campaign').innerHTML = r.campaign ? '<span class="text-emerald-400 font-bold">✅ 保留</span>' : '<span class="text-amber-400 font-bold">⚠️ 遺失</span>';
+                card.querySelector('.status-ga4').innerHTML = r.ga4Script ? '<span class="text-emerald-400 font-bold">✅ 存在</span>' : '<span class="text-rose-400 font-bold">❌ 缺失</span>';
               } else if (card) {
-                card.querySelector('.status-cookie').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
-                card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
-                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
+                card.querySelector('.status-http').innerHTML = '<span class="text-rose-400 font-bold">❌ 連線失敗</span>';
+                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ --</span>';
+                card.querySelector('.status-ga4').innerHTML = '<span class="text-slate-500">⚪ --</span>';
               }
             } catch (e) {
               if (card) {
-                card.querySelector('.status-cookie').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
-                card.querySelector('.status-pv').innerHTML = '<span class="text-rose-400 font-bold">❌ 逾時</span>';
-                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ 未知</span>';
+                card.querySelector('.status-http').innerHTML = '<span class="text-rose-400 font-bold">❌ 連線失敗</span>';
+                card.querySelector('.status-campaign').innerHTML = '<span class="text-slate-500">⚪ --</span>';
+                card.querySelector('.status-ga4').innerHTML = '<span class="text-slate-500">⚪ --</span>';
               }
             }
           }
