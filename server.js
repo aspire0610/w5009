@@ -269,19 +269,6 @@ app.get('/', (req, res) => {
   }
 
   function toggleAutoCheck() {
-    const enabled = document.getElementById('autoCheckToggle').checked;
-    if (enabled) {
-      if (!isTesting) {
-        startCountdown();
-      } else {
-        updateCountdownDisplay();
-      }
-    } else {
-      stopCountdown();
-    }
-  }
-
-  function toggleAutoCheck() {
   const enabled = document.getElementById('autoCheckToggle').checked;
   if (enabled) {
     if (!isTesting) startCountdown();
