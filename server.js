@@ -40,8 +40,7 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// 核心頁面檢測邏輯（方案 2：每次獨立建立全新 Browser）
-async function checkUrlWithPuppeteer(item) {
+async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
   let ga4Fired = false;
@@ -50,7 +49,7 @@ async function checkUrlWithPuppeteer(item) {
     const puppeteerModule = await import('puppeteer');
     const puppeteer = puppeteerModule.default || puppeteerModule;
 
-    // ⭐️ 每次檢測都開啟一個完全獨立的全新 Chrome 進程，避開跨頁面的 Session/WAF 風控
+    // ⭐️ 加上極致輕量化參數，防止 Render/Heroku 記憶體爆滿導致卡死
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -58,18 +57,20 @@ async function checkUrlWithPuppeteer(item) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-gpu',
+        '--disable-accelerated-2d-canvas',
         '--no-first-run',
-        '--no-zygote'
+        '--no-zygote',
+        '--single-process', // 節省 RAM
+        '--disable-gpu',
+        '--disable-blink-features=AutomationControlled'
       ]
     });
 
     page = await browser.newPage();
 
-    // 1. 設定真實 User-Agent 與模擬正常環境 Header
+    // 1. 設定真實 User-Agent 與 Header
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1366, height: 768 });
+    await page.setViewport({ width: 1280, height: 720 });
 
     await page.setExtraHTTPHeaders({
       'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
@@ -79,7 +80,7 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. CDP 原生阻擋大型多媒體資源
+    // 2. CDP 強制阻擋圖片、字型、影片等無用資源，釋放頻寬
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -87,12 +88,12 @@ async function checkUrlWithPuppeteer(item) {
         patterns: [
           '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
           '*.woff', '*.woff2', '*.ttf', '*.otf',
-          '*.mp4', '*.webm'
+          '*.mp4', '*.webm', '*.css'
         ]
       });
     } catch (cdpErr) {}
 
-    // 3. 監聽 GA4 / GTM 請求
+    // 3. 監聽 GA4 / GTM
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       if (
@@ -106,36 +107,31 @@ async function checkUrlWithPuppeteer(item) {
       }
     });
 
-    // 4. 前往網址（放寬逾時時間至 45 秒）
+    // 4. 前往網址（最長 35 秒）
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
-      timeout: 45000
+      timeout: 35000
     });
 
     const httpStatus = response ? response.status() : 0;
 
-    // 5. 自動點擊 Cookie 同意按鈕
+    // 5. 自動點擊 Cookie 按鈕
     const cookieSelectors = [
       '#onetrust-accept-btn-handler',
       'button[id*="accept"]',
-      'button[class*="accept"]',
-      '.cookie-consent-accept',
-      '#accept-cookies'
+      '.cookie-consent-accept'
     ];
 
     for (const selector of cookieSelectors) {
-      const btn = await page.waitForSelector(selector, { timeout: 1500 }).catch(() => null);
+      const btn = await page.waitForSelector(selector, { timeout: 1000 }).catch(() => null);
       if (btn) {
         await btn.click().catch(() => {});
         break;
       }
     }
 
-    // 6. 模擬捲動觸發 Lazy-load
-    await page.evaluate(() => window.scrollBy(0, 400)).catch(() => {});
-
-    // 7. 動態輪詢 GA4 封包（最長 4 秒）
-    const maxWaitTime = 4000;
+    // 6. 動態輪詢 GA4 (最長 3 秒)
+    const maxWaitTime = 3000;
     const checkInterval = 200;
     let waited = 0;
 
@@ -144,7 +140,7 @@ async function checkUrlWithPuppeteer(item) {
       waited += checkInterval;
     }
 
-    // 8. 驗證 UTM 參數
+    // 7. 驗證 UTM
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -172,6 +168,14 @@ async function checkUrlWithPuppeteer(item) {
     };
 
   } catch (error) {
+    // ⭐️ 重試機制：若首次連線失敗/逾時，自動重試 1 次
+    if (retryCount < 1) {
+      if (page) await page.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      await new Promise(r => setTimeout(r, 3000)); // 冷卻 3 秒後重試
+      return await checkUrlWithPuppeteer(item, retryCount + 1);
+    }
+
     return {
       id: item.id,
       name: item.name,
@@ -182,7 +186,6 @@ async function checkUrlWithPuppeteer(item) {
       ga4Exist: '無'
     };
   } finally {
-    // ⭐️ 確保不論成功或拋出 Exception，都徹底關閉頁面與瀏覽器，防止記憶體洩漏
     if (page) await page.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
   }
