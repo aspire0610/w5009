@@ -68,6 +68,7 @@ async function checkUrlWithPuppeteer(item) {
     const browser = await getBrowser();
     page = await browser.newPage();
 
+    // 1. 設定真實 User-Agent 與防偵測
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
@@ -75,13 +76,20 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
+    // 2. 擴大 GA4 封包監控範圍（涵蓋 collect、j/collect 與各種 GA4 網域）
     page.on('request', request => {
       const reqUrl = request.url();
-      if (reqUrl.includes('google-analytics.com/g/collect') || reqUrl.includes('analytics.google.com/g/collect')) {
+      if (
+        reqUrl.includes('google-analytics.com') || 
+        reqUrl.includes('analytics.google.com') ||
+        reqUrl.includes('/g/collect') ||
+        reqUrl.includes('/j/collect')
+      ) {
         ga4Fired = true;
       }
     });
 
+    // 3. 開啟頁面
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45000
@@ -89,8 +97,7 @@ async function checkUrlWithPuppeteer(item) {
 
     const httpStatus = response ? response.status() : 0;
 
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
+    // 4. ⭐️ 關鍵修改：進頁面後立刻嘗試點擊 Cookie 同意按鈕（優先解鎖 GA4）
     try {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
@@ -101,15 +108,20 @@ async function checkUrlWithPuppeteer(item) {
       ];
 
       for (const selector of cookieSelectors) {
-        const btn = await page.$(selector);
+        const btn = await page.waitForSelector(selector, { timeout: 2500 }).catch(() => null);
         if (btn) {
           await btn.click();
-          await new Promise(resolve => setTimeout(resolve, 2000));
           break;
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      // 若無 Cookie 彈窗則繼續
+    }
 
+    // 5. 點擊同意後，停留 6 秒確保 GA4 腳本完整觸發並發出網路請求
+    await new Promise(resolve => setTimeout(resolve, 6000));
+
+    // 6. 檢查最終 URL UTM
     const finalUrl = page.url();
     let hasUtm = false;
     try {
