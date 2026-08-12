@@ -40,15 +40,18 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-let browserInstance = null;
+// 核心頁面檢測邏輯（方案 2：每次獨立建立全新 Browser）
+async function checkUrlWithPuppeteer(item) {
+  let browser = null;
+  let page = null;
+  let ga4Fired = false;
 
-// 自動檢測並復原崩潰的 Chromium 實例
-async function getBrowser() {
-  if (!browserInstance || !browserInstance.isConnected()) {
+  try {
     const puppeteerModule = await import('puppeteer');
     const puppeteer = puppeteerModule.default || puppeteerModule;
 
-    browserInstance = await puppeteer.launch({
+    // ⭐️ 每次檢測都開啟一個完全獨立的全新 Chrome 進程，避開跨頁面的 Session/WAF 風控
+    browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
@@ -61,22 +64,8 @@ async function getBrowser() {
         '--no-zygote'
       ]
     });
-  }
-  return browserInstance;
-}
 
-// 核心頁面檢測邏輯
-async function checkUrlWithPuppeteer(item) {
-  let context = null;
-  let page = null;
-  let ga4Fired = false;
-
-  try {
-    const browser = await getBrowser();
-    
-    // ⭐️ 使用獨立隱身上下文，避免 Session / Cookie 殘留觸發伺服器風控
-    context = await browser.createBrowserContext();
-    page = await context.newPage();
+    page = await browser.newPage();
 
     // 1. 設定真實 User-Agent 與模擬正常環境 Header
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
@@ -90,7 +79,7 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. CDP 原生阻擋大型多媒體資源 (以獨立 try-catch 包覆)
+    // 2. CDP 原生阻擋大型多媒體資源
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -117,7 +106,7 @@ async function checkUrlWithPuppeteer(item) {
       }
     });
 
-    // 4. 前往網址
+    // 4. 前往網址（放寬逾時時間至 45 秒）
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45000
@@ -145,7 +134,7 @@ async function checkUrlWithPuppeteer(item) {
     // 6. 模擬捲動觸發 Lazy-load
     await page.evaluate(() => window.scrollBy(0, 400)).catch(() => {});
 
-    // 7. 動態輪詢：最長等 4 秒，抓到 GA4 即刻返回
+    // 7. 動態輪詢 GA4 封包（最長 4 秒）
     const maxWaitTime = 4000;
     const checkInterval = 200;
     let waited = 0;
@@ -172,9 +161,6 @@ async function checkUrlWithPuppeteer(item) {
       hasUtm = false;
     }
 
-    await page.close().catch(() => {});
-    if (context) await context.close().catch(() => {});
-
     return {
       id: item.id,
       name: item.name,
@@ -186,8 +172,6 @@ async function checkUrlWithPuppeteer(item) {
     };
 
   } catch (error) {
-    if (page) await page.close().catch(() => {});
-    if (context) await context.close().catch(() => {});
     return {
       id: item.id,
       name: item.name,
@@ -197,6 +181,10 @@ async function checkUrlWithPuppeteer(item) {
       utmKept: '無',
       ga4Exist: '無'
     };
+  } finally {
+    // ⭐️ 確保不論成功或拋出 Exception，都徹底關閉頁面與瀏覽器，防止記憶體洩漏
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -205,7 +193,7 @@ app.use(express.json());
 // 取得目標清單
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// 執行測試 (SSE + Keep-Alive 心跳包 + 項目間 2.5 秒緩衝)
+// 執行測試 (SSE + Keep-Alive 心跳包 + 項目間 4 秒緩衝)
 app.get('/api/run-test', async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(',') : [];
   const selectedTargets = targetList.filter(t => ids.includes(t.id));
@@ -223,7 +211,7 @@ app.get('/api/run-test', async (req, res) => {
 
   try {
     for (const [index, item] of selectedTargets.entries()) {
-      sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 模擬開啟中: ${item.name}...` });
+      sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 獨立模擬開啟中: ${item.name}...` });
       
       let result;
       try {
@@ -242,7 +230,7 @@ app.get('/api/run-test', async (req, res) => {
 
       sendEvent('result', { data: result });
 
-      // ⭐️ 項目間停頓 2.5 秒避開 WAF 防火牆阻擋
+      // ⭐️ 項目間停頓 4 秒，給予伺服器足夠冷卻時間，大幅降低被 WAF 擋掉的機率
       if (index < selectedTargets.length - 1) {
         await new Promise(r => setTimeout(r, 4000));
       }
