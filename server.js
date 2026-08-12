@@ -77,13 +77,19 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // A. 攔截請求：僅阻擋大型圖片/影音/字型 (不影響 JS/CSS 運作與防護驗證)
-    await page.setRequestInterception(true);
+    // 1. ⭐️ 改用 CDP 原生層級阻擋大型副檔名（不破壞 HTTP/2 與 SSL 連線，完全不跳連線錯誤）
+    const client = await page.target().createCDPSession();
+    await client.send('Network.setBlockedUrlPatterns', {
+      patterns: [
+        '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
+        '*.woff', '*.woff2', '*.ttf', '*.otf',
+        '*.mp4', '*.webm'
+      ]
+    });
+
+    // 2. 純粹監聽網路封包（不進行任何介入攔截）
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
-      const resourceType = request.resourceType();
-
-      // 監聽 GA4 / GTM
       if (
         reqUrl.includes('google-analytics.com') || 
         reqUrl.includes('analytics.google.com') ||
@@ -93,15 +99,9 @@ async function checkUrlWithPuppeteer(item) {
       ) {
         ga4Fired = true;
       }
-
-      if (['image', 'media', 'font'].includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
     });
 
-    // B. 前往網址 (改用 domcontentloaded 快出結果)
+    // 3. 前往目標網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 30000
@@ -109,7 +109,7 @@ async function checkUrlWithPuppeteer(item) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // C. 快速搜尋並點擊 Cookie 同意 (將超時縮短至 1.5 秒，避免浪費時間等待不存在的彈窗)
+    // 4. 點擊 Cookie 同意按鈕
     const cookieSelectors = [
       '#onetrust-accept-btn-handler',
       'button[id*="accept"]',
@@ -121,15 +121,15 @@ async function checkUrlWithPuppeteer(item) {
     for (const selector of cookieSelectors) {
       const btn = await page.waitForSelector(selector, { timeout: 1500 }).catch(() => null);
       if (btn) {
-        await btn.click();
+        await btn.click().catch(() => {});
         break;
       }
     }
 
-    // D. 模擬向下捲動觸發 Lazy-load GA4
-    await page.evaluate(() => window.scrollBy(0, 400));
+    // 5. 滾動頁面觸發 Lazy-load
+    await page.evaluate(() => window.scrollBy(0, 400)).catch(() => {});
 
-    // E. ⭐️ 核心加速邏輯：動態檢查 GA4 是否發送 (最長等 4 秒，若提前觸發則 0.2 秒內直接回傳)
+    // 6. 動態輪詢等待 GA4 觸發（最長 4 秒，抓到即刻回傳）
     const maxWaitTime = 4000;
     const checkInterval = 200;
     let waited = 0;
@@ -139,7 +139,7 @@ async function checkUrlWithPuppeteer(item) {
       waited += checkInterval;
     }
 
-    // F. 驗證 UTM
+    // 7. 驗證 UTM
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -169,7 +169,7 @@ async function checkUrlWithPuppeteer(item) {
     };
 
   } catch (error) {
-    if (page) await page.close();
+    if (page) await page.close().catch(() => {});
     return {
       id: item.id,
       name: item.name,
