@@ -77,17 +77,22 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 1. ⭐️ 改用 CDP 原生層級阻擋大型副檔名（不破壞 HTTP/2 與 SSL 連線，完全不跳連線錯誤）
-    const client = await page.target().createCDPSession();
-    await client.send('Network.setBlockedUrlPatterns', {
-      patterns: [
-        '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
-        '*.woff', '*.woff2', '*.ttf', '*.otf',
-        '*.mp4', '*.webm'
-      ]
-    });
+    // 1. ⭐️ 加上獨立 try-catch 包覆 CDP 阻擋（就算環境不支援也不會影響正常檢測）
+    try {
+      const client = await page.target().createCDPSession();
+      await client.send('Network.enable');
+      await client.send('Network.setBlockedUrlPatterns', {
+        patterns: [
+          '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
+          '*.woff', '*.woff2', '*.ttf', '*.otf',
+          '*.mp4', '*.webm'
+        ]
+      });
+    } catch (cdpError) {
+      // CDP 若不受支援直接忽略，不中斷主流程
+    }
 
-    // 2. 純粹監聽網路封包（不進行任何介入攔截）
+    // 2. 監聽 GA4 封包
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       if (
@@ -101,10 +106,10 @@ async function checkUrlWithPuppeteer(item) {
       }
     });
 
-    // 3. 前往目標網址
+    // 3. 前往網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
-      timeout: 30000
+      timeout: 35000
     });
 
     const httpStatus = response ? response.status() : 0;
@@ -156,7 +161,7 @@ async function checkUrlWithPuppeteer(item) {
       hasUtm = false;
     }
 
-    await page.close();
+    await page.close().catch(() => {});
 
     return {
       id: item.id,
@@ -169,6 +174,7 @@ async function checkUrlWithPuppeteer(item) {
     };
 
   } catch (error) {
+    console.error(`[Test Failed] ${item.name}:`, error.message); // 在伺服器 Log 留上記錄
     if (page) await page.close().catch(() => {});
     return {
       id: item.id,
