@@ -2,6 +2,7 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// 預設監測網址清單
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
   { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true },
@@ -41,6 +42,7 @@ let targetList = [
 
 let browserInstance = null;
 
+// 自動檢測並復原崩潰的 Chromium 實例
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
     const puppeteerModule = await import('puppeteer');
@@ -62,6 +64,8 @@ async function getBrowser() {
   }
   return browserInstance;
 }
+
+// 核心頁面檢測邏輯
 async function checkUrlWithPuppeteer(item) {
   let page = null;
   let ga4Fired = false;
@@ -70,6 +74,7 @@ async function checkUrlWithPuppeteer(item) {
     const browser = await getBrowser();
     page = await browser.newPage();
 
+    // 1. 設定真實 User-Agent 與模擬正常環境
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
@@ -77,7 +82,7 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 1. ⭐️ 加上獨立 try-catch 包覆 CDP 阻擋（就算環境不支援也不會影響正常檢測）
+    // 2. CDP 原生阻擋大型多媒體資源 (以獨立 try-catch 包覆，確保環境相容性)
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -88,11 +93,9 @@ async function checkUrlWithPuppeteer(item) {
           '*.mp4', '*.webm'
         ]
       });
-    } catch (cdpError) {
-      // CDP 若不受支援直接忽略，不中斷主流程
-    }
+    } catch (cdpErr) {}
 
-    // 2. 監聽 GA4 封包
+    // 3. 監聽 GA4 / GTM 請求
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       if (
@@ -106,7 +109,7 @@ async function checkUrlWithPuppeteer(item) {
       }
     });
 
-    // 3. 前往網址
+    // 4. 前往網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 35000
@@ -114,7 +117,7 @@ async function checkUrlWithPuppeteer(item) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 4. 點擊 Cookie 同意按鈕
+    // 5. 自動點擊 Cookie 同意按鈕
     const cookieSelectors = [
       '#onetrust-accept-btn-handler',
       'button[id*="accept"]',
@@ -131,10 +134,10 @@ async function checkUrlWithPuppeteer(item) {
       }
     }
 
-    // 5. 滾動頁面觸發 Lazy-load
+    // 6. 模擬捲動觸發 Lazy-load 廣告/追蹤碼
     await page.evaluate(() => window.scrollBy(0, 400)).catch(() => {});
 
-    // 6. 動態輪詢等待 GA4 觸發（最長 4 秒，抓到即刻回傳）
+    // 7. 動態輪詢：最長等 4 秒，抓到 GA4 即立刻返回
     const maxWaitTime = 4000;
     const checkInterval = 200;
     let waited = 0;
@@ -144,7 +147,7 @@ async function checkUrlWithPuppeteer(item) {
       waited += checkInterval;
     }
 
-    // 7. 驗證 UTM
+    // 8. 驗證 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -174,7 +177,6 @@ async function checkUrlWithPuppeteer(item) {
     };
 
   } catch (error) {
-    console.error(`[Test Failed] ${item.name}:`, error.message); // 在伺服器 Log 留上記錄
     if (page) await page.close().catch(() => {});
     return {
       id: item.id,
@@ -187,13 +189,17 @@ async function checkUrlWithPuppeteer(item) {
     };
   }
 }
+
 app.use(express.json());
 
+// 取得目標清單
+app.get('/api/targets', (req, res) => res.json(targetList));
+
+// 執行測試 (SSE + Keep-Alive 心跳包)
 app.get('/api/run-test', async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(',') : [];
   const selectedTargets = targetList.filter(t => ids.includes(t.id));
 
-  // 1. 設定 SSE 標頭（加上 X-Accel-Buffering 避免被代理伺服器截斷）
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -201,7 +207,7 @@ app.get('/api/run-test', async (req, res) => {
 
   const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
 
-  // 2. 定時發送心跳包，維持 HTTP 連線不被 Render 切斷
+  // 心跳包每 10 秒發送，避免 Render / Proxy 連線逾時斷開
   const keepAliveInterval = setInterval(() => {
     res.write(': keep-alive\n\n');
   }, 10000);
@@ -210,7 +216,6 @@ app.get('/api/run-test', async (req, res) => {
     for (const [index, item] of selectedTargets.entries()) {
       sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 模擬開啟中: ${item.name}...` });
       
-      // 個別抓取加上 try-catch，防止單一網址出錯掛掉整個 SSE 流程
       let result;
       try {
         result = await checkUrlWithPuppeteer(item);
@@ -238,6 +243,7 @@ app.get('/api/run-test', async (req, res) => {
   }
 });
 
+// 前端 UI 畫面
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -245,15 +251,15 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>⚡ 5009 UTM & GA4真實瀏覽器儀表板</title>
+      <title>⚡ UTM & 真實瀏覽器監測儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
       <div class="max-w-4xl mx-auto space-y-4">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器儀表板</h1>
-            <p class="text-xs text-slate-400">模擬真人點擊 Cookie & GA4 封包監控</p>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
+            <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · 模擬點擊 Cookie & GA4 封包監控</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
         </div>
@@ -267,10 +273,9 @@ app.get('/', (req, res) => {
           <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
               <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
-              <span class="text-slate-200 font-bold">🔄 自動重複</span>
+              <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
             </label>
             <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
-              <option value="30" selected>每 30 秒（測試）</option>
               <option value="60" selected>每 1 分鐘</option>
               <option value="300">每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
