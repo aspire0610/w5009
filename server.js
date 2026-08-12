@@ -281,12 +281,19 @@ app.get('/', (req, res) => {
     }
   }
 
-  function updateAutoCheckInterval() {
-    if (document.getElementById('autoCheckToggle').checked && !isTesting) {
-      startCountdown();
-    }
+  function toggleAutoCheck() {
+  const enabled = document.getElementById('autoCheckToggle').checked;
+  if (enabled) {
+    if (!isTesting) startCountdown();
+  } else {
+    stopCountdown();
   }
-
+}
+function updateAutoCheckInterval() {
+  if (document.getElementById('autoCheckToggle').checked && !isTesting) {
+    startCountdown();
+  }
+}
   function startCountdown() {
     stopCountdown();
     remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
@@ -312,27 +319,26 @@ app.get('/', (req, res) => {
   }
 
   function updateCountdownDisplay() {
-    const enabled = document.getElementById('autoCheckToggle').checked;
-    const countdownText = document.getElementById('countdownText');
+  const enabled = document.getElementById('autoCheckToggle').checked;
+  const countdownText = document.getElementById('countdownText');
 
-    if (!enabled) {
-      countdownText.textContent = '(未開啟)';
-      countdownText.className = 'text-slate-500 text-xs font-mono';
-      return;
-    }
-
-    if (isTesting) {
-      countdownText.textContent = '⏳ 檢測進行中...';
-      countdownText.className = 'text-amber-400 font-mono font-bold animate-pulse';
-      return;
-    }
-
-    const m = Math.floor(remainingSeconds / 60);
-    const s = remainingSeconds % 60;
-    countdownText.textContent = `⏳ ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')} 後觸發`;
-    countdownText.className = 'text-amber-400 font-mono font-bold';
+  if (!enabled) {
+    countdownText.textContent = '(未開啟)';
+    countdownText.className = 'text-slate-500 text-xs font-mono';
+    return;
   }
 
+    if (isTesting) {
+    countdownText.textContent = '⏳ 檢測進行中...';
+    countdownText.className = 'text-amber-400 font-mono font-bold animate-pulse';
+    return;
+  }
+
+  const m = Math.floor(remainingSeconds / 60);
+  const s = remainingSeconds % 60;
+  countdownText.textContent = `⏳ ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')} 後觸發`;
+  countdownText.className = 'text-amber-400 font-mono font-bold';
+}
   function runTest() {
     const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
     if (selected.length === 0) return alert('請至少勾選一個項目！');
