@@ -40,6 +40,7 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
+// 核心頁面檢測邏輯（穩定防崩潰版）
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
@@ -49,7 +50,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     const puppeteerModule = await import('puppeteer');
     const puppeteer = puppeteerModule.default || puppeteerModule;
 
-    // ⭐️ 加上極致輕量化參數，防止 Render/Heroku 記憶體爆滿導致卡死
+    // ⭐️ 移除不穩定的 --single-process，改用標準安全防跌參數
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -60,9 +61,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // 節省 RAM
         '--disable-gpu',
-        '--disable-blink-features=AutomationControlled'
+        '--disable-blink-features=AutomationControlled',
+        '--js-flags=--max-old-space-size=256'
       ]
     });
 
@@ -80,7 +81,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. CDP 強制阻擋圖片、字型、影片等無用資源，釋放頻寬
+    // 2. CDP 阻擋非必要資源，降低負擔
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -107,10 +108,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 4. 前往網址（最長 35 秒）
+    // 4. 前往網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
-      timeout: 35000
+      timeout: 30000
     });
 
     const httpStatus = response ? response.status() : 0;
@@ -130,8 +131,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     }
 
-    // 6. 動態輪詢 GA4 (最長 3 秒)
-    const maxWaitTime = 3000;
+    // 6. 動態輪詢 GA4 (最長 2.5 秒)
+    const maxWaitTime = 2500;
     const checkInterval = 200;
     let waited = 0;
 
@@ -168,11 +169,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     };
 
   } catch (error) {
-    // ⭐️ 重試機制：若首次連線失敗/逾時，自動重試 1 次
+    // 自動重試一次
     if (retryCount < 1) {
       if (page) await page.close().catch(() => {});
       if (browser) await browser.close().catch(() => {});
-      await new Promise(r => setTimeout(r, 3000)); // 冷卻 3 秒後重試
+      await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -193,28 +194,29 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
 app.use(express.json());
 
-// 取得目標清單
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// 執行測試 (SSE + Keep-Alive 心跳包 + 項目間 4 秒緩衝)
+// 執行測試 (強化版防斷線 SSE)
 app.get('/api/run-test', async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(',') : [];
   const selectedTargets = targetList.filter(t => ids.includes(t.id));
 
+  // ⭐️ 防斷線 Header 配置
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
   const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
 
+  // ⭐️ 縮短至每 3 秒發送一次心跳包，強迫 Keep-Alive
   const keepAliveInterval = setInterval(() => {
     res.write(': keep-alive\n\n');
-  }, 10000);
+  }, 3000);
 
   try {
     for (const [index, item] of selectedTargets.entries()) {
-      sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 獨立模擬開啟中: ${item.name}...` });
+      sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 模擬開啟中: ${item.name}...` });
       
       let result;
       try {
@@ -233,9 +235,9 @@ app.get('/api/run-test', async (req, res) => {
 
       sendEvent('result', { data: result });
 
-      // ⭐️ 項目間停頓 4 秒，給予伺服器足夠冷卻時間，大幅降低被 WAF 擋掉的機率
+      // 項目間冷卻停頓 2.5 秒
       if (index < selectedTargets.length - 1) {
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, 2500));
       }
     }
 
@@ -256,14 +258,14 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>⚡ UTM & GA4真實瀏覽器監測儀表板</title>
+      <title>⚡ UTM & 真實瀏覽器監測儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
       <div class="max-w-4xl mx-auto space-y-4">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & GA4 真實瀏覽器監測儀表板</h1>
+            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">真實瀏覽器 · 模擬點擊 Cookie & GA4 封包監控[獨立視窗私密瀏覽＋cookie同意＋等4秒]</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
@@ -278,15 +280,13 @@ app.get('/', (req, res) => {
           <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
               <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
-              <span class="text-slate-200 font-bold">🔄 自動</span>
+              <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
             </label>
             <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
-              <option value="10" selected>每 10 秒（測試）</option>
-              <option value="30" selected>每 30 秒（測試）</option>
+              <option value="10" selected>每 10 秒</option>
               <option value="60" selected>每 1 分鐘</option>
               <option value="300">每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
-              <option value="1800">每 30 分鐘</option>
             </select>
             <span id="countdownText" class="text-slate-500 text-xs font-mono">(未開啟)</span>
           </div>
@@ -491,7 +491,7 @@ app.get('/', (req, res) => {
 
           evtSource.onerror = () => {
             evtSource.close();
-            statusBox.textContent = '❌ 連線中斷';
+            statusBox.textContent = '⚠️ 檢測完成或連線離線，已自動儲存結果。';
             startBtn.disabled = false;
             startBtn.classList.remove('opacity-50');
 
