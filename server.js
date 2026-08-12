@@ -15,19 +15,22 @@ let browserInstance = null;
 
 async function getBrowser() {
   if (!browserInstance) {
-    // 改為動態載入 ESM 模組
     const puppeteerModule = await import('puppeteer');
     const puppeteer = puppeteerModule.default || puppeteerModule;
 
     browserInstance = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled' // 隱藏自動化特徵
+      ]
     });
   }
   return browserInstance;
 }
-
 async function checkUrlWithPuppeteer(item) {
   let page = null;
   let ga4Fired = false;
@@ -36,9 +39,14 @@ async function checkUrlWithPuppeteer(item) {
     const browser = await getBrowser();
     page = await browser.newPage();
 
-    // 1. 設定真實使用者代理 (User Agent) 與視窗大小
+    // 1. 設定真實 User-Agent 與避開自動化檢測機制
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1280, height: 800 });
+    await page.setViewport({ width: 1366, height: 768 });
+
+    // 隱藏 navigator.webdriver 機器人標籤
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
 
     // 2. 監聽網路請求：捕捉 GA4 collect 封包
     page.on('request', request => {
@@ -48,15 +56,18 @@ async function checkUrlWithPuppeteer(item) {
       }
     });
 
-    // 3. 前往目標頁面
+    // 3. 改用 domcontentloaded 避免等不到 networkidle 而逾時
     const response = await page.goto(item.url, {
-      waitUntil: 'networkidle2', // 等待網路請求穩定
-      timeout: 30000
+      waitUntil: 'domcontentloaded', 
+      timeout: 45000 // 加長逾時時間至 45 秒
     });
 
     const httpStatus = response ? response.status() : 0;
 
-    // 4. 自動尋找並點擊 Cookie 同意按鈕（嘗試常見的 Cookie 同意按鈕選擇器）
+    // 4. 等待 5 秒讓背景 Cookie 視窗與 GA4 觸發
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // 5. 自動尋找並點擊 Cookie 同意按鈕
     try {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
@@ -70,7 +81,7 @@ async function checkUrlWithPuppeteer(item) {
         const btn = await page.$(selector);
         if (btn) {
           await btn.click();
-          await page.waitForTimeout(1000); // 點擊後等待 1 秒讓套件觸發
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 點擊後等待 2 秒
           break;
         }
       }
@@ -78,7 +89,7 @@ async function checkUrlWithPuppeteer(item) {
       // 若無跳出 Cookie 視窗則忽略
     }
 
-    // 5. 檢查最終 URL 是否有保留 UTM 參數
+    // 6. 檢查最終 URL 是否有保留 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
