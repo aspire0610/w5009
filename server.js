@@ -88,7 +88,18 @@ async function checkUrlWithPuppeteer(item) {
         ga4Fired = true;
       }
     });
+// 1. 啟動請求攔截機制
+await page.setRequestInterception(true);
 
+// 2. 阻擋圖片、CSS 樣式、字型與影音檔，只保留 HTML 與 JavaScript
+page.on('request', (req) => {
+  const resourceType = req.resourceType();
+  if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+    req.abort();
+  } else {
+    req.continue();
+  }
+});
     // 3. 開啟頁面
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
