@@ -68,7 +68,7 @@ async function checkUrlWithPuppeteer(item) {
     const browser = await getBrowser();
     page = await browser.newPage();
 
-    // 1. 設定真實 User-Agent 與模擬正常瀏覽器環境
+    // 1. 設定真實 User-Agent 與防自動化標記
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
@@ -76,27 +76,17 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. 啟動請求攔截，並將 GA4 捕捉與資源過濾整合在「同一個」監聽器中
-    await page.setRequestInterception(true);
+    // 2. 監聽網路請求：擴大捕捉 GA4 / GTM 相關封包 (包含代碼管理工具與 collect 請求)
     page.on('request', request => {
-      const reqUrl = request.url();
-      const resourceType = request.resourceType();
-
-      // (A) 捕捉 GA4 封包
+      const reqUrl = request.url().toLowerCase();
       if (
         reqUrl.includes('google-analytics.com') || 
         reqUrl.includes('analytics.google.com') ||
-        reqUrl.includes('/g/collect') ||
-        reqUrl.includes('/j/collect')
+        reqUrl.includes('googletagmanager.com') ||
+        reqUrl.includes('/collect') ||
+        reqUrl.includes('gtm.js')
       ) {
         ga4Fired = true;
-      }
-
-      // (B) 僅阻擋圖片、字型與影音（保留 CSS，避免觸發網站防火牆攔截）
-      if (['image', 'font', 'media'].includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
       }
     });
 
@@ -108,7 +98,7 @@ async function checkUrlWithPuppeteer(item) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 4. 嘗試點擊 Cookie 同意按鈕
+    // 4. 等待並自動點擊 Cookie 同意按鈕
     try {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
@@ -119,20 +109,26 @@ async function checkUrlWithPuppeteer(item) {
       ];
 
       for (const selector of cookieSelectors) {
-        const btn = await page.waitForSelector(selector, { timeout: 2500 }).catch(() => null);
+        const btn = await page.waitForSelector(selector, { timeout: 4000 }).catch(() => null);
         if (btn) {
           await btn.click();
+          await new Promise(resolve => setTimeout(resolve, 1500));
           break;
         }
       }
     } catch (e) {
-      // 忽略 Cookie 彈窗錯誤
+      // 忽略 Cookie 彈窗搜尋錯誤
     }
 
-    // 5. 等待 5 秒讓 GA4 請求發出
+    // 5. 模擬真人向下捲動頁面，觸發 Lazy-load 的 GA4 追蹤碼
+    await page.evaluate(() => {
+      window.scrollBy(0, 400);
+    });
+
+    // 6. 停留 5 秒確保數據封包順利發送完成
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // 6. 檢查最終 URL 參數
+    // 7. 檢查最終 URL 是否保留 UTM
     const finalUrl = page.url();
     let hasUtm = false;
     try {
