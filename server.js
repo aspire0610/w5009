@@ -120,7 +120,7 @@ async function checkUrlWithPuppeteer(item) {
     // 4. 前往網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
-      timeout: 35000
+      timeout: 45000
     });
 
     const httpStatus = response ? response.status() : 0;
@@ -244,7 +244,7 @@ app.get('/api/run-test', async (req, res) => {
 
       // ⭐️ 項目間停頓 2.5 秒避開 WAF 防火牆阻擋
       if (index < selectedTargets.length - 1) {
-        await new Promise(r => setTimeout(r, 2500));
+        await new Promise(r => setTimeout(r, 4000));
       }
     }
 
