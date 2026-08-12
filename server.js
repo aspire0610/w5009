@@ -205,187 +205,221 @@ app.get('/', (req, res) => {
         <div id="cardsContainer" class="space-y-3"></div>
       </div>
 
-      <script>
-        let targets = [];
-        let autoTimer = null;
-        let countdownTimer = null;
-        let remainingSeconds = 0;
-        let itemStats = {};
+<script>
+  let targets = [];
+  let countdownTimer = null;
+  let remainingSeconds = 0;
+  let itemStats = {};
+  let isTesting = false; // 紀錄目前是否正在執行測試
 
-        async function init() {
-          const res = await fetch('/api/targets');
-          targets = await res.json();
-          renderCards();
-          updateCount();
-          updateCountdownDisplay();
-        }
+  async function init() {
+    const res = await fetch('/api/targets');
+    targets = await res.json();
+    renderCards();
+    updateCount();
+    updateCountdownDisplay();
+  }
 
-        function renderCards() {
-          const container = document.getElementById('cardsContainer');
-          container.innerHTML = targets.map(t => \`
-            <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
-              <div class="flex items-start justify-between space-x-3 gap-2">
-                <div class="flex items-start space-x-3 min-w-0 flex-1">
-                  <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount()">
-                  <div class="min-w-0 flex-1">
-                    <h3 class="font-bold text-base text-slate-100 truncate">\${t.name}</h3>
-                    <p class="text-xs text-slate-400 truncate">\${t.url}</p>
-                  </div>
-                </div>
-
-                <div class="text-right text-xs shrink-0 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 font-mono">
-                  <span class="text-slate-400">已測: </span>
-                  <span class="card-total-count font-bold text-sky-400">0</span> 次
-                  <span class="text-slate-500 ml-1">(<span class="card-success-count text-emerald-400">0</span> 成功 / <span class="card-fail-count text-rose-400">0</span> 失敗)</span>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-3 gap-2 text-center text-xs">
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">連線狀態</div>
-                  <span class="status-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">UTM參數</div>
-                  <span class="utm-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">GA4觸發</div>
-                  <span class="ga-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-              </div>
+  function renderCards() {
+    const container = document.getElementById('cardsContainer');
+    container.innerHTML = targets.map(t => `
+      <div id="card-${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
+        <div class="flex items-start justify-between space-x-3 gap-2">
+          <div class="flex items-start space-x-3 min-w-0 flex-1">
+            <input type="checkbox" value="${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" ${t.enabled ? 'checked' : ''} onchange="updateCount()">
+            <div class="min-w-0 flex-1">
+              <h3 class="font-bold text-base text-slate-100 truncate">${t.name}</h3>
+              <p class="text-xs text-slate-400 truncate">${t.url}</p>
             </div>
-          \`).join('');
+          </div>
+
+          <div class="text-right text-xs shrink-0 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 font-mono">
+            <span class="text-slate-400">已測: </span>
+            <span class="card-total-count font-bold text-sky-400">0</span> 次
+            <span class="text-slate-500 ml-1">(<span class="card-success-count text-emerald-400">0</span> 成功 / <span class="card-fail-count text-rose-400">0</span> 失敗)</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 text-center text-xs">
+          <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+            <div class="text-slate-400 mb-1">連線狀態</div>
+            <span class="status-val font-bold text-slate-300">⚪ 未測</span>
+          </div>
+          <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+            <div class="text-slate-400 mb-1">UTM參數</div>
+            <span class="utm-val font-bold text-slate-300">⚪ 未測</span>
+          </div>
+          <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+            <div class="text-slate-400 mb-1">GA4觸發</div>
+            <span class="ga-val font-bold text-slate-300">⚪ 未測</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function toggleSelectAll(master) {
+    document.querySelectorAll('.target-checkbox').forEach(cb => cb.checked = master.checked);
+    updateCount();
+  }
+
+  function updateCount() {
+    const checked = document.querySelectorAll('.target-checkbox:checked').length;
+    document.getElementById('selectedCount').textContent = `已勾選: ${checked}`;
+  }
+
+  function toggleAutoCheck() {
+    const enabled = document.getElementById('autoCheckToggle').checked;
+    if (enabled) {
+      if (!isTesting) {
+        startCountdown();
+      } else {
+        updateCountdownDisplay();
+      }
+    } else {
+      stopCountdown();
+    }
+  }
+
+  function updateAutoCheckInterval() {
+    if (document.getElementById('autoCheckToggle').checked && !isTesting) {
+      startCountdown();
+    }
+  }
+
+  function startCountdown() {
+    stopCountdown();
+    remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
+    updateCountdownDisplay();
+
+    countdownTimer = setInterval(() => {
+      remainingSeconds--;
+      if (remainingSeconds <= 0) {
+        stopCountdown();
+        runTest(); // 倒數完畢自動觸發，測試期間會自動停止計時
+      } else {
+        updateCountdownDisplay();
+      }
+    }, 1000);
+  }
+
+  function stopCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+    updateCountdownDisplay();
+  }
+
+  function updateCountdownDisplay() {
+    const enabled = document.getElementById('autoCheckToggle').checked;
+    const countdownText = document.getElementById('countdownText');
+
+    if (!enabled) {
+      countdownText.textContent = '(未開啟)';
+      countdownText.className = 'text-slate-500 text-xs font-mono';
+      return;
+    }
+
+    if (isTesting) {
+      countdownText.textContent = '⏳ 檢測進行中...';
+      countdownText.className = 'text-amber-400 font-mono font-bold animate-pulse';
+      return;
+    }
+
+    const m = Math.floor(remainingSeconds / 60);
+    const s = remainingSeconds % 60;
+    countdownText.textContent = `⏳ ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')} 後觸發`;
+    countdownText.className = 'text-amber-400 font-mono font-bold';
+  }
+
+  function runTest() {
+    const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
+    if (selected.length === 0) return alert('請至少勾選一個項目！');
+
+    isTesting = true;
+    stopCountdown(); // 開始測試時立刻暫停/清除倒數
+
+    const startBtn = document.getElementById('startBtn');
+    const statusBox = document.getElementById('statusBox');
+    startBtn.disabled = true;
+    startBtn.classList.add('opacity-50');
+    statusBox.classList.remove('hidden');
+
+    const evtSource = new EventSource('/api/run-test?ids=' + selected.join(','));
+
+    evtSource.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === 'log') {
+        statusBox.textContent = `⏳ ${data.message}`;
+      } else if (data.type === 'result') {
+        const r = data.data;
+        const card = document.getElementById('card-' + r.id);
+
+        if (!itemStats[r.id]) {
+          itemStats[r.id] = { total: 0, success: 0, fail: 0 };
         }
 
-        function toggleSelectAll(master) {
-          document.querySelectorAll('.target-checkbox').forEach(cb => cb.checked = master.checked);
-          updateCount();
+        const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
+        
+        itemStats[r.id].total++;
+        if (isPass) {
+          itemStats[r.id].success++;
+        } else {
+          itemStats[r.id].fail++;
         }
 
-        function updateCount() {
-          const checked = document.querySelectorAll('.target-checkbox:checked').length;
-          document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
+        if (card) {
+          card.querySelector('.card-total-count').textContent = itemStats[r.id].total;
+          card.querySelector('.card-success-count').textContent = itemStats[r.id].success;
+          card.querySelector('.card-fail-count').textContent = itemStats[r.id].fail;
+
+          const statusEl = card.querySelector('.status-val');
+          statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
+          statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
+
+          const utmEl = card.querySelector('.utm-val');
+          utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
+          utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
+
+          const gaEl = card.querySelector('.ga-val');
+          gaEl.textContent = r.ga4Exist === '存在' ? '✅ 觸發成功' : '❌ 未觸發';
+          gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
         }
+      } else if (data.type === 'done') {
+        evtSource.close();
+        statusBox.textContent = '✨ 檢測完成！(' + new Date().toLocaleTimeString() + ')';
+        startBtn.disabled = false;
+        startBtn.classList.remove('opacity-50');
 
-        function toggleAutoCheck() {
-          const enabled = document.getElementById('autoCheckToggle').checked;
-          if (enabled) {
-            startAutoTimer();
-          } else {
-            clearInterval(autoTimer);
-            clearInterval(countdownTimer);
-            updateCountdownDisplay();
-          }
-        }
-
-        function updateAutoCheckInterval() {
-          if (document.getElementById('autoCheckToggle').checked) {
-            startAutoTimer();
-          }
-        }
-
-        function startAutoTimer() {
-          clearInterval(autoTimer);
-          clearInterval(countdownTimer);
-
-          remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
+        isTesting = false;
+        // 測試完成後，若「自動輪詢」依然勾選著，才開始全新一輪的倒數
+        if (document.getElementById('autoCheckToggle').checked) {
+          startCountdown();
+        } else {
           updateCountdownDisplay();
-
-          countdownTimer = setInterval(() => {
-            remainingSeconds--;
-            if (remainingSeconds <= 0) {
-              runTest();
-              remainingSeconds = parseInt(document.getElementById('intervalSelect').value, 10);
-            }
-            updateCountdownDisplay();
-          }, 1000);
         }
+      }
+    };
 
-        function updateCountdownDisplay() {
-          const enabled = document.getElementById('autoCheckToggle').checked;
-          const countdownText = document.getElementById('countdownText');
+    evtSource.onerror = () => {
+      evtSource.close();
+      statusBox.textContent = '❌ 連線中斷';
+      startBtn.disabled = false;
+      startBtn.classList.remove('opacity-50');
 
-          if (!enabled) {
-            countdownText.textContent = '(未開啟)';
-            countdownText.className = 'text-slate-500 text-xs font-mono';
-            return;
-          }
+      isTesting = false;
+      // 發生異常結束時同樣重置狀態，並依據開關決定是否重新倒數
+      if (document.getElementById('autoCheckToggle').checked) {
+        startCountdown();
+      } else {
+        updateCountdownDisplay();
+      }
+    };
+  }
 
-          const m = Math.floor(remainingSeconds / 60);
-          const s = remainingSeconds % 60;
-          countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')} 後觸發\`;
-          countdownText.className = 'text-amber-400 font-mono font-bold';
-        }
-
-        function runTest() {
-          const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
-          if (selected.length === 0) return alert('請至少勾選一個項目！');
-
-          const startBtn = document.getElementById('startBtn');
-          const statusBox = document.getElementById('statusBox');
-          startBtn.disabled = true;
-          startBtn.classList.add('opacity-50');
-          statusBox.classList.remove('hidden');
-
-          const evtSource = new EventSource('/api/run-test?ids=' + selected.join(','));
-
-          evtSource.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.type === 'log') {
-              statusBox.textContent = \`⏳ \${data.message}\`;
-            } else if (data.type === 'result') {
-              const r = data.data;
-              const card = document.getElementById('card-' + r.id);
-
-              if (!itemStats[r.id]) {
-                itemStats[r.id] = { total: 0, success: 0, fail: 0 };
-              }
-
-              const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
-              
-              itemStats[r.id].total++;
-              if (isPass) {
-                itemStats[r.id].success++;
-              } else {
-                itemStats[r.id].fail++;
-              }
-
-              if (card) {
-                card.querySelector('.card-total-count').textContent = itemStats[r.id].total;
-                card.querySelector('.card-success-count').textContent = itemStats[r.id].success;
-                card.querySelector('.card-fail-count').textContent = itemStats[r.id].fail;
-
-                const statusEl = card.querySelector('.status-val');
-                statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
-                statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
-
-                const utmEl = card.querySelector('.utm-val');
-                utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
-                utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
-
-                const gaEl = card.querySelector('.ga-val');
-                gaEl.textContent = r.ga4Exist === '存在' ? '✅ 觸發成功' : '❌ 未觸發';
-                gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
-              }
-            } else if (data.type === 'done') {
-              evtSource.close();
-              statusBox.textContent = '✨ 檢測完成！(' + new Date().toLocaleTimeString() + ')';
-              startBtn.disabled = false;
-              startBtn.classList.remove('opacity-50');
-            }
-          };
-
-          evtSource.onerror = () => {
-            evtSource.close();
-            statusBox.textContent = '❌ 連線中斷';
-            startBtn.disabled = false;
-            startBtn.classList.remove('opacity-50');
-          };
-        }
-
-        init();
-      </script>
+  init();
+</script>
     </body>
     </html>
   `);
