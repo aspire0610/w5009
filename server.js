@@ -68,7 +68,7 @@ async function checkUrlWithPuppeteer(item) {
     const browser = await getBrowser();
     page = await browser.newPage();
 
-    // 1. 設定真實 User-Agent 與防偵測
+    // 1. 設定真實 User-Agent 與模擬正常瀏覽器環境
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
@@ -76,9 +76,13 @@ async function checkUrlWithPuppeteer(item) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. 擴大 GA4 封包監控範圍（涵蓋 collect、j/collect 與各種 GA4 網域）
+    // 2. 啟動請求攔截，並將 GA4 捕捉與資源過濾整合在「同一個」監聽器中
+    await page.setRequestInterception(true);
     page.on('request', request => {
       const reqUrl = request.url();
+      const resourceType = request.resourceType();
+
+      // (A) 捕捉 GA4 封包
       if (
         reqUrl.includes('google-analytics.com') || 
         reqUrl.includes('analytics.google.com') ||
@@ -87,20 +91,16 @@ async function checkUrlWithPuppeteer(item) {
       ) {
         ga4Fired = true;
       }
-    });
-// 1. 啟動請求攔截機制
-await page.setRequestInterception(true);
 
-// 2. 阻擋圖片、CSS 樣式、字型與影音檔，只保留 HTML 與 JavaScript
-page.on('request', (req) => {
-  const resourceType = req.resourceType();
-  if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-    req.abort();
-  } else {
-    req.continue();
-  }
-});
-    // 3. 開啟頁面
+      // (B) 僅阻擋圖片、字型與影音（保留 CSS，避免觸發網站防火牆攔截）
+      if (['image', 'font', 'media'].includes(resourceType)) {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+
+    // 3. 前往目標網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45000
@@ -108,7 +108,7 @@ page.on('request', (req) => {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 4. ⭐️ 關鍵修改：進頁面後立刻嘗試點擊 Cookie 同意按鈕（優先解鎖 GA4）
+    // 4. 嘗試點擊 Cookie 同意按鈕
     try {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
@@ -126,13 +126,13 @@ page.on('request', (req) => {
         }
       }
     } catch (e) {
-      // 若無 Cookie 彈窗則繼續
+      // 忽略 Cookie 彈窗錯誤
     }
 
-    // 5. 點擊同意後，停留 6 秒確保 GA4 腳本完整觸發並發出網路請求
-    await new Promise(resolve => setTimeout(resolve, 6000));
+    // 5. 等待 5 秒讓 GA4 請求發出
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // 6. 檢查最終 URL UTM
+    // 6. 檢查最終 URL 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
