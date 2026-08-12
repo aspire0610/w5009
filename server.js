@@ -67,22 +67,30 @@ async function getBrowser() {
 
 // 核心頁面檢測邏輯
 async function checkUrlWithPuppeteer(item) {
+  let context = null;
   let page = null;
   let ga4Fired = false;
 
   try {
     const browser = await getBrowser();
-    page = await browser.newPage();
+    
+    // ⭐️ 使用獨立隱身上下文，避免 Session / Cookie 殘留觸發伺服器風控
+    context = await browser.createBrowserContext();
+    page = await context.newPage();
 
-    // 1. 設定真實 User-Agent 與模擬正常環境
+    // 1. 設定真實 User-Agent 與模擬正常環境 Header
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
+
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+    });
 
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 2. CDP 原生阻擋大型多媒體資源 (以獨立 try-catch 包覆，確保環境相容性)
+    // 2. CDP 原生阻擋大型多媒體資源 (以獨立 try-catch 包覆)
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -134,10 +142,10 @@ async function checkUrlWithPuppeteer(item) {
       }
     }
 
-    // 6. 模擬捲動觸發 Lazy-load 廣告/追蹤碼
+    // 6. 模擬捲動觸發 Lazy-load
     await page.evaluate(() => window.scrollBy(0, 400)).catch(() => {});
 
-    // 7. 動態輪詢：最長等 4 秒，抓到 GA4 即立刻返回
+    // 7. 動態輪詢：最長等 4 秒，抓到 GA4 即刻返回
     const maxWaitTime = 4000;
     const checkInterval = 200;
     let waited = 0;
@@ -165,6 +173,7 @@ async function checkUrlWithPuppeteer(item) {
     }
 
     await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
 
     return {
       id: item.id,
@@ -178,6 +187,7 @@ async function checkUrlWithPuppeteer(item) {
 
   } catch (error) {
     if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     return {
       id: item.id,
       name: item.name,
@@ -195,7 +205,7 @@ app.use(express.json());
 // 取得目標清單
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// 執行測試 (SSE + Keep-Alive 心跳包)
+// 執行測試 (SSE + Keep-Alive 心跳包 + 項目間 2.5 秒緩衝)
 app.get('/api/run-test', async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(',') : [];
   const selectedTargets = targetList.filter(t => ids.includes(t.id));
@@ -207,7 +217,6 @@ app.get('/api/run-test', async (req, res) => {
 
   const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
 
-  // 心跳包每 10 秒發送，避免 Render / Proxy 連線逾時斷開
   const keepAliveInterval = setInterval(() => {
     res.write(': keep-alive\n\n');
   }, 10000);
@@ -232,6 +241,11 @@ app.get('/api/run-test', async (req, res) => {
       }
 
       sendEvent('result', { data: result });
+
+      // ⭐️ 項目間停頓 2.5 秒避開 WAF 防火牆阻擋
+      if (index < selectedTargets.length - 1) {
+        await new Promise(r => setTimeout(r, 2500));
+      }
     }
 
     sendEvent('done', {});
