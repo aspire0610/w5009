@@ -1,5 +1,4 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -16,9 +15,13 @@ let browserInstance = null;
 
 async function getBrowser() {
   if (!browserInstance) {
+    // 改為動態載入 ESM 模組
+    const puppeteerModule = await import('puppeteer');
+    const puppeteer = puppeteerModule.default || puppeteerModule;
+
     browserInstance = await puppeteer.launch({
       headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // 抓取容器內部的 Chromium
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
   }
