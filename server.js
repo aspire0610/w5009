@@ -42,7 +42,7 @@ let targetList = [
 let browserInstance = null;
 
 async function getBrowser() {
-  if (!browserInstance) {
+  if (!browserInstance || !browserInstance.isConnected()) {
     const puppeteerModule = await import('puppeteer');
     const puppeteer = puppeteerModule.default || puppeteerModule;
 
@@ -189,26 +189,53 @@ async function checkUrlWithPuppeteer(item) {
 }
 app.use(express.json());
 
-app.get('/api/targets', (req, res) => res.json(targetList));
-
 app.get('/api/run-test', async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(',') : [];
   const selectedTargets = targetList.filter(t => ids.includes(t.id));
 
+  // 1. 設定 SSE 標頭（加上 X-Accel-Buffering 避免被代理伺服器截斷）
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
   const sendEvent = (type, payload) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
 
-  for (const [index, item] of selectedTargets.entries()) {
-    sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 模擬開啟中: ${item.name}...` });
-    const result = await checkUrlWithPuppeteer(item);
-    sendEvent('result', { data: result });
-  }
+  // 2. 定時發送心跳包，維持 HTTP 連線不被 Render 切斷
+  const keepAliveInterval = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 10000);
 
-  sendEvent('done', {});
-  res.end();
+  try {
+    for (const [index, item] of selectedTargets.entries()) {
+      sendEvent('log', { message: `[${index + 1}/${selectedTargets.length}] Puppeteer 模擬開啟中: ${item.name}...` });
+      
+      // 個別抓取加上 try-catch，防止單一網址出錯掛掉整個 SSE 流程
+      let result;
+      try {
+        result = await checkUrlWithPuppeteer(item);
+      } catch (err) {
+        result = {
+          id: item.id,
+          name: item.name,
+          url: item.url,
+          status: 0,
+          statusText: '檢測過程異常',
+          utmKept: '無',
+          ga4Exist: '無'
+        };
+      }
+
+      sendEvent('result', { data: result });
+    }
+
+    sendEvent('done', {});
+  } catch (globalError) {
+    console.error('SSE 全域錯誤:', globalError);
+  } finally {
+    clearInterval(keepAliveInterval);
+    res.end();
+  }
 });
 
 app.get('/', (req, res) => {
