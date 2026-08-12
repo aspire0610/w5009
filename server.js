@@ -194,6 +194,7 @@ app.get('/', (req, res) => {
               <option value="60">每 1 分鐘</option>
               <option value="300" selected>每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
+              <option value="1800">每 30 分鐘</option>
             </select>
             <span id="countdownText" class="text-amber-400 font-mono font-bold"></span>
           </div>
