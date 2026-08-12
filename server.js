@@ -164,15 +164,15 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>⚡ UTM & 真實瀏覽器監測儀表板</title>
+      <title>⚡ UTM & GA4 真實瀏覽器儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
       <div class="max-w-4xl mx-auto space-y-4">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
-            <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · 模擬點擊 Cookie & GA4 封包監控</p>
+            <h1 class="text-xl font-bold text-sky-400">⚡ 5009UTM & 真實瀏覽器監測儀表板</h1>
+            <p class="text-xs text-slate-400">模擬點擊 Cookie & GA4 封包監控</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
         </div>
@@ -186,9 +186,11 @@ app.get('/', (req, res) => {
           <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
               <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
-              <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
+              <span class="text-slate-200 font-bold">🔄 自動重複測試</span>
             </label>
             <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
+              <option value="10">每 1 秒（測試用）</option>
+              <option value="30">每 30 秒（測試用）</option>
               <option value="60">每 1 分鐘</option>
               <option value="300" selected>每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
