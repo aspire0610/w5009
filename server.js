@@ -188,9 +188,8 @@ app.get('/', (req, res) => {
               <input type="checkbox" id="autoCheckToggle" onchange="toggleAutoCheck()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
               <span class="text-slate-200 font-bold">🔄 自動重複測試</span>
             </label>
-            <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
-              <option value="10">每 10 秒（測試用）</option>
-              <option value="30">每 30 秒（測試用）</option>
+            <select id="intervalSelect" onchange="updateAutoCheckInterval()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">    
+            <option value="30">每 30 秒（測試用）</option>
               <option value="60">每 1 分鐘</option>
               <option value="300" selected>每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
