@@ -8,38 +8,10 @@ let targetList = [
   { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true },
   { id: "3", name: "Rollout 家具海報", url: "https://www.costco.com.tw/content/showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=Poster-FurnitureRollOut", enabled: true },
   { id: "4", name: "Rollout Lsign", url: "https://www.costco.com.tw/content/showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-FurnitureRollOut", enabled: true },
-  { id: "5", name: "吊掛", url: "https://www.costco.com.tw/c/hero-showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=showroom-hangingbanner", enabled: true },
-  { id: "6", name: "易拉展", url: "https://www.costco.com.tw/c/hero-showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=showroom-rollupbanner", enabled: true },
-  { id: "7", name: "Lsign 通用", url: "https://www.costco.com.tw/c/OnlineExclusive?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-OnlineExclusive", enabled: true },
-  { id: "8", name: "Lsign 家電", url: "https://www.costco.com.tw/Televisions-Appliances/Large-Appliances/c/301?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Appliances", enabled: true },
-  { id: "9", name: "Lsign 電視", url: "https://www.costco.com.tw/Televisions-Appliances/TV-Home-Entertainment/c/101?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-tvs", enabled: true },
-  { id: "10", name: "Lsign 輪胎", url: "https://www.costco.com.tw/Sports-Lifestyle/Automotive/c/1421?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Tire", enabled: true },
-  { id: "11", name: "Lsign 玩具", url: "https://www.costco.com.tw/Household-Baby-Toys/Toys/c/1308?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D28", enabled: true },
-  { id: "12", name: "Lsign HABA", url: "https://www.costco.com.tw/Health-Beauty/Personal-Care/c/801?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D20", enabled: true },
-  { id: "13", name: "Lsign 運動", url: "https://www.costco.com.tw/Sports-Lifestyle/Sports-Fitness/c/1209?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D26", enabled: true },
-  { id: "14", name: "Lsign 服飾", url: "https://www.costco.com.tw/Clothing-Accessories/c/9?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D31D39", enabled: true },
-  { id: "15", name: "Lsign 食品", url: "https://www.costco.com.tw/Food-Dining/c/CL8?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D12D13", enabled: true },
-  { id: "16", name: "Lsign 五金", url: "https://www.costco.com.tw/Furniture-Kitchen/Hardware-DIY/c/605?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D23", enabled: true },
-  { id: "17", name: "Lsign 床墊", url: "https://www.costco.com.tw/Furniture-Kitchen/Bedding/Mattress-Toppers/c/60205?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-Mattress", enabled: true },
-  { id: "18", name: "Lsign 儲藏屋", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Outdoor-Storage/c/40201?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D27", enabled: true },
-  { id: "19", name: "Lsign 沙發", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Sofas-Sectionals/c/50202?utm_source=warehouse&utm_medium=W5009&utm_campaign=Lsign-D38", enabled: true },
-  { id: "20", name: "ENDCAP", url: "https://www.costco.com.tw/c/OnlineExclusive?utm_source=warehouse&utm_medium=W5009&utm_campaign=Endcap-OnlineEX", enabled: true },
-  { id: "21", name: "靜電貼紙 同價", url: "https://www.costco.com.tw/Same-Price/c/hero-sameprice?utm_source=warehouse&utm_medium=W5009&utm_campaign=Sticker-SamePrice", enabled: true },
-  { id: "22", name: "M / L Sign 同價", url: "https://www.costco.com.tw/Same-Price/c/hero-sameprice?utm_source=warehouse&utm_medium=W5009&utm_campaign=Sign-SamePrice", enabled: true },
-  { id: "23", name: "fy26p8 Minispotlight 週期購", url: "https://www.costco.com.tw/content/subscription?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p8_Minispotlight_Subscription", enabled: true },
-  { id: "24", name: "fy26p8 Minispotlight Costco APP", url: "https://www.costco.com.tw/costco-app?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p8_Minispotlight_CostcoApp", enabled: true },
-  { id: "25", name: "fy26 p10 app poster iOS", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_app_poster_iOS", enabled: true },
-  { id: "26", name: "fy26 p10 app poster Android", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_app_poster_Android", enabled: true },
-  { id: "27", name: "fy26 p10 minispotlight iOS", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_mini_spotlight_iOS", enabled: true },
-  { id: "28", name: "fy26 p10 minispotlight Android", url: "https://www.costco.com.tw/content/costco-app-ios?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_mini_spotlight_Android", enabled: true },
-  { id: "29", name: "fy26p10w4 EM", url: "https://www.costco.com.tw/executive-rewards?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26p_10w4_EM", enabled: true },
-  { id: "30", name: "fy26p10w4 D27", url: "https://www.costco.com.tw/Lawn-Garden/Patio-Furniture/Outdoor-Patio-Furniture/c/40102?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p10_banner_d27", enabled: true },
-  { id: "31", name: "fy26p12w3 Showroom (沙發)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Sofas-Sectionals/c/50202?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_Sofas", enabled: true },
-  { id: "32", name: "fy26p12w3 Showroom (櫥櫃桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Cabinets-Tables/c/50407?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_Cabinets", enabled: true },
-  { id: "33", name: "fy26p12w3 Showroom (餐廳組)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Dining-Sets/c/50301?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_DiningSets", enabled: true },
-  { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
+  { id: "5", name: "吊掛", url: "https://www.costco.com.tw/c/hero-showroom?utm_source=warehouse&utm_medium=W5009&utm_campaign=showroom-hangingbanner", enabled: true }
 ];
-// ⭐️ 全局狀態儲存（用於背景非同步任務）
+
+// ⭐️ 全局狀態儲存（用於背景非同步任務與輪詢）
 let globalState = {
   isRunning: false,
   currentLog: '',
@@ -74,8 +46,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     page = await browser.newPage();
 
+    // 1. 設定真實 User-Agent 與視窗大小
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1280, height: 720 });
+    await page.setViewport({ width: 1366, height: 768 });
 
     await page.setExtraHTTPHeaders({
       'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
@@ -85,6 +58,24 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
+    // ⭐️ 2. 注入 Costco OneTrust Cookie 同意狀態（預先同意，跳過彈窗）
+    const domain = '.costco.com.tw';
+    await page.setCookie(
+      {
+        name: 'OptanonAlertBoxClosed',
+        value: new Date().toISOString(),
+        domain: domain,
+        path: '/'
+      },
+      {
+        name: 'OptanonConsent',
+        value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1',
+        domain: domain,
+        path: '/'
+      }
+    );
+
+    // 3. CDP 阻擋重型媒體資源（保留 CSS 以確保 DOM 與 GA4 腳本正常運行）
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -92,11 +83,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         patterns: [
           '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
           '*.woff', '*.woff2', '*.ttf', '*.otf',
-          '*.mp4', '*.webm', '*.css'
+          '*.mp4', '*.webm'
         ]
       });
     } catch (cdpErr) {}
 
+    // 4. 監聽 GA4 / GTM 封包發送
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       if (
@@ -110,6 +102,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
+    // 5. 前往目標網址
     const response = await page.goto(item.url, {
       waitUntil: 'domcontentloaded',
       timeout: 30000
@@ -117,29 +110,22 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    const cookieSelectors = [
-      '#onetrust-accept-btn-handler',
-      'button[id*="accept"]',
-      '.cookie-consent-accept'
-    ];
+    // 6. 模擬使用者向下滾動，觸發 GA4 頁面活躍度與滾動事件
+    await page.evaluate(() => {
+      window.scrollBy(0, 300);
+    }).catch(() => {});
 
-    for (const selector of cookieSelectors) {
-      const btn = await page.waitForSelector(selector, { timeout: 1000 }).catch(() => null);
-      if (btn) {
-        await btn.click().catch(() => {});
-        break;
-      }
-    }
-
-    const maxWaitTime = 2500;
+    // 7. 給予 3 秒冷卻時間，確保 GA4 數據順利上報至後台
+    const maxWaitTime = 3000;
     const checkInterval = 200;
     let waited = 0;
 
-    while (!ga4Fired && waited < maxWaitTime) {
+    while (waited < maxWaitTime) {
       await new Promise(r => setTimeout(r, checkInterval));
       waited += checkInterval;
     }
 
+    // 8. 驗證 UTM 參數是否被保留
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -189,7 +175,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// ⭐️ 背景執行檢測任務
+// 背景非同步任務處理
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
 
@@ -211,7 +197,7 @@ async function runBackgroundTest(selectedTargets) {
       };
     }
 
-    // 更新狀態
+    // 更新單項結果
     globalState.results[item.id] = result;
 
     if (index < selectedTargets.length - 1) {
@@ -225,9 +211,10 @@ async function runBackgroundTest(selectedTargets) {
 
 app.use(express.json());
 
+// API: 取得目標清單
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// 1. 觸發測試 (立即返回 200，不等待執行完成)
+// API: 觸發測試（立即返回 200，不阻塞 HTTP 連線）
 app.post('/api/start-test', (req, res) => {
   if (globalState.isRunning) {
     return res.status(400).json({ error: '測試正在進行中' });
@@ -240,18 +227,18 @@ app.post('/api/start-test', (req, res) => {
     return res.status(400).json({ error: '未選擇項目' });
   }
 
-  // 背景非同步執行，不等待 Promise
+  // 觸發背景非同步任務
   runBackgroundTest(selectedTargets);
 
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// 2. 取得目前測試進度狀態 (前端定期 Polling)
+// API: 取得目前狀態與結果（前端輪詢使用）
 app.get('/api/status', (req, res) => {
   res.json(globalState);
 });
 
-// 前端 UI 畫面
+// 前端 UI 介面
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -267,7 +254,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · 模擬點擊 Cookie & GA4 封包監控</p>
+            <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · Cookie 預注入與 GA4 封包監控</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
         </div>
@@ -451,7 +438,7 @@ app.get('/', (req, res) => {
               return;
             }
 
-            // ⭐️ 開始短輪詢 Polling (每 1.5 秒查一次)
+            // 開始短輪詢 Polling (每 1.5 秒向伺服器查詢一次最新進度)
             let processedIds = new Set();
             pollTimer = setInterval(async () => {
               try {
@@ -497,7 +484,7 @@ app.get('/', (req, res) => {
                   }
                 });
 
-                // 檢測完成
+                // 檢測完成，停止短輪詢
                 if (!state.isRunning) {
                   clearInterval(pollTimer);
                   pollTimer = null;
