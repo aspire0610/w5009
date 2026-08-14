@@ -59,6 +59,7 @@ let sseClients = [];
 
 /**
  * 廣播狀態給所有連線中的前端 (SSE)
+ * 帶有清理已斷線 Client 的機制
  */
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
@@ -76,7 +77,17 @@ function broadcastLog(logText) {
   };
 
   const data = `data: ${JSON.stringify(payload)}\n\n`;
-  sseClients.forEach(client => client.write(data));
+
+  // 廣播並過濾失效連線
+  sseClients = sseClients.filter(client => {
+    if (client.writableEnded || client.destroyed) return false;
+    try {
+      client.write(data);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
 }
 
 // ⭐️ 後端掌控的定時器（每秒觸發一次倒數）
@@ -101,12 +112,20 @@ setInterval(() => {
   }
 }, 1000);
 
-// SSE 心跳包防止斷連
+// SSE 心跳包：縮短至 10 秒發送一次，避免電信業者 NAT 閒置斷線
 setInterval(() => {
-  sseClients.forEach(client => client.write(': keep-alive\n\n'));
-}, 15000);
+  sseClients = sseClients.filter(client => {
+    if (client.writableEnded || client.destroyed) return false;
+    try {
+      client.write(': keep-alive\n\n');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+}, 10000);
 
-// Puppeteer 核心檢測邏輯
+// Puppeteer 核心檢測邏輯（優化 Render 記憶體）
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
@@ -122,6 +141,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--disable-gpu',
+        '--single-process', // 優化防 Render RAM 爆掉
         '--disable-blink-features=AutomationControlled', '--js-flags=--max-old-space-size=256'
       ]
     });
@@ -232,9 +252,12 @@ async function runBackgroundTest(selectedTargets) {
 
 app.use(express.json());
 
+// ⭐️ 防 Render 免費版 15 分鐘休眠專用端點 (請用 UptimeRobot 定時打這個 URL)
+app.get('/ping', (req, res) => res.status(200).send('pong'));
+
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// ⭐️ API: 開啟/關閉後端自動輪詢
+// API: 開啟/關閉後端自動輪詢
 app.post('/api/config-auto-check', (req, res) => {
   const { enabled, intervalSeconds, selectedIds } = req.body;
   globalState.autoCheck.enabled = enabled;
@@ -242,7 +265,6 @@ app.post('/api/config-auto-check', (req, res) => {
   if (selectedIds) globalState.autoCheck.selectedIds = selectedIds;
   
   if (enabled) {
-    // 若重新開啟或設定，重置倒數
     globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   }
   
@@ -261,11 +283,12 @@ app.post('/api/start-test', (req, res) => {
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// SSE 串流
+// SSE 串流 (優化 Render & 手機關螢幕重連機制)
 app.get('/api/stream-logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // 避免被 Render 反向代理快取
   res.flushHeaders();
 
   sseClients.push(res);
@@ -356,14 +379,15 @@ app.get('/', (req, res) => {
           updateCount();
           initSSE();
 
-          // ⭐️ 初始化完成後，主動把前端目前勾選狀態同步給後端
           setTimeout(() => {
             syncAutoCheckToServer();
           }, 500);
         }
 
         function initSSE() {
-          if (evtSource) evtSource.close();
+          if (evtSource) {
+            evtSource.close();
+          }
           evtSource = new EventSource('/api/stream-logs');
 
           evtSource.onopen = () => {
