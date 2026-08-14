@@ -40,7 +40,7 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// ⭐️ 全局狀態儲存
+// 全局狀態儲存
 let globalState = {
   isRunning: false,
   currentLog: '',
@@ -72,6 +72,11 @@ function broadcastLog(logText) {
   const data = `data: ${JSON.stringify(payload)}\n\n`;
   sseClients.forEach(client => client.write(data));
 }
+
+// 每 15 秒發送心跳包，維持背景連線活性
+setInterval(() => {
+  sseClients.forEach(client => client.write(': keep-alive\n\n'));
+}, 15000);
 
 // 核心頁面檢測邏輯
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
@@ -262,7 +267,7 @@ app.post('/api/start-test', (req, res) => {
 // API: 傳統狀態輪詢（備用）
 app.get('/api/status', (req, res) => res.json(globalState));
 
-// ⭐️ API: SSE 實時日誌與進度串流
+// API: SSE 實時日誌與進度串流
 app.get('/api/stream-logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -271,7 +276,7 @@ app.get('/api/stream-logs', (req, res) => {
 
   sseClients.push(res);
 
-  // 立即發送一次當前狀態給剛打開手機網頁的人
+  // 立即發送當前最新狀態給剛連線的前端
   const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
   const initPayload = {
     time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
@@ -368,6 +373,7 @@ app.get('/', (req, res) => {
         let itemStats = {};
         let isTesting = false;
         let processedResultIds = new Set();
+        let evtSource = null;
 
         async function init() {
           const res = await fetch('/api/targets');
@@ -377,15 +383,25 @@ app.get('/', (req, res) => {
           initSSE();
         }
 
-        // ⭐️ 連接 SSE 串流 (手機鎖屏打開後自動同步進度)
+        // ⭐️ 連接與喚醒修復版 SSE 串流
         function initSSE() {
-          const evtSource = new EventSource('/api/stream-logs');
+          if (evtSource) {
+            evtSource.close();
+          }
+
+          evtSource = new EventSource('/api/stream-logs');
           const terminalBox = document.getElementById('terminalBox');
           const progressBar = document.getElementById('progressBar');
           const progressPercentText = document.getElementById('progressPercentText');
           const progressStatusText = document.getElementById('progressStatusText');
           const progressContainer = document.getElementById('progressContainer');
           const startBtn = document.getElementById('startBtn');
+          const sseStatus = document.getElementById('sseStatus');
+
+          evtSource.onopen = () => {
+            sseStatus.innerText = '● 連線正常';
+            sseStatus.className = 'text-emerald-500 font-bold';
+          };
 
           evtSource.onmessage = (event) => {
             const data = JSON.parse(event.data);
@@ -430,10 +446,18 @@ app.get('/', (req, res) => {
           };
 
           evtSource.onerror = () => {
-            document.getElementById('sseStatus').innerText = '○ 連線重試中';
-            document.getElementById('sseStatus').className = 'text-amber-500 font-bold';
+            sseStatus.innerText = '○ 連線重試中...';
+            sseStatus.className = 'text-amber-500 font-bold animate-pulse';
           };
         }
+
+        // 💡 螢幕解鎖/亮起時自動強制重新連線 SSE
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            console.log('📱 頁面已恢復可見，重新建立 SSE 連線...');
+            initSSE();
+          }
+        });
 
         function updateCardUI(id, r) {
           const card = document.getElementById('card-' + id);
