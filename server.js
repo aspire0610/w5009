@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 預設監測網址清單
+// 預設監測網址清單 (完整 34 項)
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
   { id: "2", name: "珠寶櫃", url: "https://www.costco.com.tw/Jewelry-Gold/Jewelry-Buying-guide/Jewelry-Gold/c/CL10?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-jewelry", enabled: true },
@@ -40,13 +40,38 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-
-// ⭐️ 全局狀態儲存（用於背景非同步任務與輪詢）
+// ⭐️ 全局狀態儲存
 let globalState = {
   isRunning: false,
   currentLog: '',
-  results: {} // key: targetId, value: resultObj
+  total: 0,
+  current: 0,
+  results: {}
 };
+
+// 儲存所有連線中的 SSE 前端用戶
+let sseClients = [];
+
+/**
+ * 廣播實時 Log 與進度給前端 (SSE)
+ */
+function broadcastLog(logText) {
+  globalState.currentLog = logText;
+  const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
+  
+  const payload = {
+    time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+    log: logText,
+    percent: percent,
+    isRunning: globalState.isRunning,
+    current: globalState.current,
+    total: globalState.total,
+    results: globalState.results
+  };
+
+  const data = `data: ${JSON.stringify(payload)}\n\n`;
+  sseClients.forEach(client => client.write(data));
+}
 
 // 核心頁面檢測邏輯
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
@@ -88,32 +113,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // ⭐️ 2. 注入 Costco OneTrust Cookie 同意狀態（預先同意，跳過彈窗）
+    // 2. 注入 Costco OneTrust Cookie
     const domain = '.costco.com.tw';
     await page.setCookie(
-      {
-        name: 'OptanonAlertBoxClosed',
-        value: new Date().toISOString(),
-        domain: domain,
-        path: '/'
-      },
-      {
-        name: 'OptanonConsent',
-        value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1',
-        domain: domain,
-        path: '/'
-      }
+      { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
+      { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
     );
 
-    // 3. CDP 阻擋重型媒體資源（保留 CSS 以確保 DOM 與 GA4 腳本正常運行）
+    // 3. CDP 阻擋重型媒體資源
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
       await client.send('Network.setBlockedUrlPatterns', {
         patterns: [
           '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg',
-          '*.woff', '*.woff2', '*.ttf', '*.otf',
-          '*.mp4', '*.webm'
+          '*.woff', '*.woff2', '*.ttf', '*.otf', '*.mp4', '*.webm'
         ]
       });
     } catch (cdpErr) {}
@@ -140,22 +154,13 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 6. 模擬使用者向下滾動，觸發 GA4 頁面活躍度與滾動事件
-    await page.evaluate(() => {
-      window.scrollBy(0, 300);
-    }).catch(() => {});
+    // 6. 模擬使用者向下滾動
+    await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
 
-    // 7. 給予 3 秒冷卻時間，確保 GA4 數據順利上報至後台
-    const maxWaitTime = 3000;
-    const checkInterval = 200;
-    let waited = 0;
+    // 7. 給予 3 秒冷卻等待時間
+    await new Promise(r => setTimeout(r, 3000));
 
-    while (waited < maxWaitTime) {
-      await new Promise(r => setTimeout(r, checkInterval));
-      waited += checkInterval;
-    }
-
-    // 8. 驗證 UTM 參數是否被保留
+    // 8. 驗證 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -191,13 +196,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     return {
-      id: item.id,
-      name: item.name,
-      url: item.url,
-      status: 0,
-      statusText: '連線逾時/失敗',
-      utmKept: '無',
-      ga4Exist: '無'
+      id: item.id, name: item.name, url: item.url,
+      status: 0, statusText: '連線逾時/失敗', utmKept: '無', ga4Exist: '無'
     };
   } finally {
     if (page) await page.close().catch(() => {});
@@ -208,35 +208,33 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 // 背景非同步任務處理
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
+  globalState.total = selectedTargets.length;
+  globalState.current = 0;
+
+  broadcastLog(`🚀 測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
-    globalState.currentLog = `[${index + 1}/${selectedTargets.length}] 模擬開啟中: ${item.name}...`;
+    globalState.current = index + 1;
+    broadcastLog(`[${index + 1}/${selectedTargets.length}] 模擬開啟中: ${item.name}...`);
     
     let result;
     try {
       result = await checkUrlWithPuppeteer(item);
     } catch (err) {
-      result = {
-        id: item.id,
-        name: item.name,
-        url: item.url,
-        status: 0,
-        statusText: '檢測過程異常',
-        utmKept: '無',
-        ga4Exist: '無'
-      };
+      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無' };
     }
 
-    // 更新單項結果
+    // 更新單項結果並即時推播
     globalState.results[item.id] = result;
+    broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
 
     if (index < selectedTargets.length - 1) {
       await new Promise(r => setTimeout(r, 2500));
     }
   }
 
-  globalState.currentLog = `✨ 檢測完成！(${new Date().toLocaleTimeString()})`;
   globalState.isRunning = false;
+  broadcastLog(`✨ 檢測完成！(${new Date().toLocaleTimeString()})`);
 }
 
 app.use(express.json());
@@ -244,7 +242,7 @@ app.use(express.json());
 // API: 取得目標清單
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// API: 觸發測試（立即返回 200，不阻塞 HTTP 連線）
+// API: 觸發測試
 app.post('/api/start-test', (req, res) => {
   if (globalState.isRunning) {
     return res.status(400).json({ error: '測試正在進行中' });
@@ -257,15 +255,38 @@ app.post('/api/start-test', (req, res) => {
     return res.status(400).json({ error: '未選擇項目' });
   }
 
-  // 觸發背景非同步任務
   runBackgroundTest(selectedTargets);
-
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// API: 取得目前狀態與結果（前端輪詢使用）
-app.get('/api/status', (req, res) => {
-  res.json(globalState);
+// API: 傳統狀態輪詢（備用）
+app.get('/api/status', (req, res) => res.json(globalState));
+
+// ⭐️ API: SSE 實時日誌與進度串流
+app.get('/api/stream-logs', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  sseClients.push(res);
+
+  // 立即發送一次當前狀態給剛打開手機網頁的人
+  const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
+  const initPayload = {
+    time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+    log: globalState.currentLog || '🟢 伺服器就緒，等待測試...',
+    percent: percent,
+    isRunning: globalState.isRunning,
+    current: globalState.current,
+    total: globalState.total,
+    results: globalState.results
+  };
+  res.write(`data: ${JSON.stringify(initPayload)}\n\n`);
+
+  req.on('close', () => {
+    sseClients = sseClients.filter(c => c !== res);
+  });
 });
 
 // 前端 UI 介面
@@ -279,16 +300,41 @@ app.get('/', (req, res) => {
       <title>⚡ UTM & 真實瀏覽器監測儀表板</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    <body class="bg-slate-900 text-slate-100 min-h-screen p-6">
+    <body class="bg-slate-900 text-slate-100 min-h-screen p-4 sm:p-6">
       <div class="max-w-4xl mx-auto space-y-4">
+        
+        <!-- 頂部標題與執行按鈕 -->
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · Cookie 預注入與 GA4 封包監控</p>
           </div>
-          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto">🚀 執行測試</button>
+          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
 
+        <!-- 實時進度條 (SSE 自動更新) -->
+        <div id="progressContainer" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 space-y-1.5">
+          <div class="flex justify-between text-xs text-sky-300 font-bold">
+            <span id="progressStatusText">⏳ 正在處理中...</span>
+            <span id="progressPercentText">0%</span>
+          </div>
+          <div class="w-full bg-slate-900 rounded-full h-2.5 overflow-hidden border border-slate-700">
+            <div id="progressBar" class="bg-sky-400 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- 終端機即時 Log 視窗 -->
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 font-mono text-xs text-emerald-400 shadow-inner">
+          <div class="text-slate-500 mb-1 flex justify-between items-center text-[10px] uppercase tracking-wider">
+            <span>> Terminal Real-time Logs</span>
+            <span id="sseStatus" class="text-emerald-500 font-bold">● 連線正常</span>
+          </div>
+          <div id="terminalBox" class="h-20 overflow-y-auto space-y-1 text-slate-300">
+            <div>> 等待發起測試...</div>
+          </div>
+        </div>
+
+        <!-- 控制選單與輪詢設定 -->
         <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 flex flex-wrap justify-between items-center gap-3">
           <label class="flex items-center space-x-2 text-sm font-medium cursor-pointer">
             <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" checked class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
@@ -311,23 +357,112 @@ app.get('/', (req, res) => {
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
         </div>
 
-        <div id="statusBox" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 text-xs text-sky-300">⏳ 處理中...</div>
+        <!-- 卡片清單區域 -->
         <div id="cardsContainer" class="space-y-3"></div>
       </div>
 
       <script>
         let targets = [];
         let countdownTimer = null;
-        let pollTimer = null;
         let remainingSeconds = 0;
         let itemStats = {};
         let isTesting = false;
+        let processedResultIds = new Set();
 
         async function init() {
           const res = await fetch('/api/targets');
           targets = await res.json();
           renderCards();
           updateCount();
+          initSSE();
+        }
+
+        // ⭐️ 連接 SSE 串流 (手機鎖屏打開後自動同步進度)
+        function initSSE() {
+          const evtSource = new EventSource('/api/stream-logs');
+          const terminalBox = document.getElementById('terminalBox');
+          const progressBar = document.getElementById('progressBar');
+          const progressPercentText = document.getElementById('progressPercentText');
+          const progressStatusText = document.getElementById('progressStatusText');
+          const progressContainer = document.getElementById('progressContainer');
+          const startBtn = document.getElementById('startBtn');
+
+          evtSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            // 1. 更新 Terminal 日誌
+            if (data.log) {
+              const line = document.createElement('div');
+              line.innerText = \`[\${data.time}] \${data.log}\`;
+              terminalBox.appendChild(line);
+              terminalBox.scrollTop = terminalBox.scrollHeight;
+              progressStatusText.innerText = data.log;
+            }
+
+            // 2. 更新進度條 UI
+            if (data.isRunning) {
+              isTesting = true;
+              startBtn.disabled = true;
+              startBtn.classList.add('opacity-50');
+              progressContainer.classList.remove('hidden');
+              progressBar.style.width = \`\${data.percent}%\`;
+              progressPercentText.innerText = \`\${data.percent}%\`;
+            } else {
+              if (isTesting) {
+                isTesting = false;
+                startBtn.disabled = false;
+                startBtn.classList.remove('opacity-50');
+                if (document.getElementById('autoCheckToggle').checked) startCountdown();
+              }
+              if (data.percent === 100) {
+                progressBar.style.width = '100%';
+                progressPercentText.innerText = '100%';
+                setTimeout(() => progressContainer.classList.add('hidden'), 3000);
+              }
+            }
+
+            // 3. 即時同步卡片測試結果
+            if (data.results) {
+              Object.keys(data.results).forEach(id => {
+                updateCardUI(id, data.results[id]);
+              });
+            }
+          };
+
+          evtSource.onerror = () => {
+            document.getElementById('sseStatus').innerText = '○ 連線重試中';
+            document.getElementById('sseStatus').className = 'text-amber-500 font-bold';
+          };
+        }
+
+        function updateCardUI(id, r) {
+          const card = document.getElementById('card-' + id);
+          if (!card) return;
+
+          if (!processedResultIds.has(id)) {
+            processedResultIds.add(id);
+            if (!itemStats[id]) itemStats[id] = { total: 0, success: 0, fail: 0 };
+
+            const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
+            itemStats[id].total++;
+            if (isPass) itemStats[id].success++; else itemStats[id].fail++;
+          }
+
+          card.querySelector('.card-total-count').textContent = itemStats[id].total;
+          card.querySelector('.card-success-count').textContent = itemStats[id].success;
+          card.querySelector('.card-fail-count').textContent = itemStats[id].fail;
+
+          const statusEl = card.querySelector('.status-val');
+          statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
+          statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
+
+          const utmEl = card.querySelector('.utm-val');
+          utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
+          utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
+
+          const gaEl = card.querySelector('.ga-val');
+          gaEl.textContent = r.ga4Exist === '存在' ? '✅ 觸發成功' : '❌ 未觸發';
+          gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
         }
 
         function renderCards() {
@@ -379,8 +514,7 @@ app.get('/', (req, res) => {
         }
 
         function toggleAutoCheck() {
-          const enabled = document.getElementById('autoCheckToggle').checked;
-          if (enabled) {
+          if (document.getElementById('autoCheckToggle').checked) {
             if (!isTesting) startCountdown();
           } else {
             stopCountdown();
@@ -388,9 +522,7 @@ app.get('/', (req, res) => {
         }
 
         function updateAutoCheckInterval() {
-          if (document.getElementById('autoCheckToggle').checked && !isTesting) {
-            startCountdown();
-          }
+          if (document.getElementById('autoCheckToggle').checked && !isTesting) startCountdown();
         }
 
         function startCountdown() {
@@ -410,10 +542,7 @@ app.get('/', (req, res) => {
         }
 
         function stopCountdown() {
-          if (countdownTimer) {
-            clearInterval(countdownTimer);
-            countdownTimer = null;
-          }
+          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
           updateCountdownDisplay();
         }
 
@@ -421,17 +550,8 @@ app.get('/', (req, res) => {
           const enabled = document.getElementById('autoCheckToggle').checked;
           const countdownText = document.getElementById('countdownText');
 
-          if (!enabled) {
-            countdownText.textContent = '(未開啟)';
-            countdownText.className = 'text-slate-500 text-xs font-mono';
-            return;
-          }
-
-          if (isTesting) {
-            countdownText.textContent = '⏳ 檢測進行中...';
-            countdownText.className = 'text-amber-400 font-mono font-bold animate-pulse';
-            return;
-          }
+          if (!enabled) { countdownText.textContent = '(未開啟)'; countdownText.className = 'text-slate-500 text-xs font-mono'; return; }
+          if (isTesting) { countdownText.textContent = '⏳ 檢測進行中...'; countdownText.className = 'text-amber-400 font-mono font-bold animate-pulse'; return; }
 
           const m = Math.floor(remainingSeconds / 60);
           const s = remainingSeconds % 60;
@@ -443,14 +563,9 @@ app.get('/', (req, res) => {
           const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
           if (selected.length === 0) return alert('請至少勾選一個項目！');
 
+          processedResultIds.clear();
           isTesting = true;
           stopCountdown();
-
-          const startBtn = document.getElementById('startBtn');
-          const statusBox = document.getElementById('statusBox');
-          startBtn.disabled = true;
-          startBtn.classList.add('opacity-50');
-          statusBox.classList.remove('hidden');
 
           try {
             const startRes = await fetch('/api/start-test', {
@@ -462,79 +577,10 @@ app.get('/', (req, res) => {
             if (!startRes.ok) {
               const err = await startRes.json();
               alert(err.error || '啟動失敗');
-              startBtn.disabled = false;
-              startBtn.classList.remove('opacity-50');
               isTesting = false;
-              return;
             }
-
-            // 開始短輪詢 Polling (每 1.5 秒向伺服器查詢一次最新進度)
-            let processedIds = new Set();
-            pollTimer = setInterval(async () => {
-              try {
-                const res = await fetch('/api/status');
-                const state = await res.json();
-
-                statusBox.textContent = \`⏳ \${state.currentLog}\`;
-
-                // 更新已有結果的卡片
-                Object.keys(state.results).forEach(id => {
-                  const r = state.results[id];
-                  const card = document.getElementById('card-' + id);
-
-                  if (!processedIds.has(id)) {
-                    processedIds.add(id);
-
-                    if (!itemStats[id]) {
-                      itemStats[id] = { total: 0, success: 0, fail: 0 };
-                    }
-
-                    const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
-                    itemStats[id].total++;
-                    if (isPass) itemStats[id].success++;
-                    else itemStats[id].fail++;
-                  }
-
-                  if (card) {
-                    card.querySelector('.card-total-count').textContent = itemStats[id].total;
-                    card.querySelector('.card-success-count').textContent = itemStats[id].success;
-                    card.querySelector('.card-fail-count').textContent = itemStats[id].fail;
-
-                    const statusEl = card.querySelector('.status-val');
-                    statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
-                    statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
-
-                    const utmEl = card.querySelector('.utm-val');
-                    utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
-                    utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
-
-                    const gaEl = card.querySelector('.ga-val');
-                    gaEl.textContent = r.ga4Exist === '存在' ? '✅ 觸發成功' : '❌ 未觸發';
-                    gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
-                  }
-                });
-
-                // 檢測完成，停止短輪詢
-                if (!state.isRunning) {
-                  clearInterval(pollTimer);
-                  pollTimer = null;
-                  startBtn.disabled = false;
-                  startBtn.classList.remove('opacity-50');
-
-                  isTesting = false;
-                  if (document.getElementById('autoCheckToggle').checked) {
-                    startCountdown();
-                  } else {
-                    updateCountdownDisplay();
-                  }
-                }
-              } catch (e) {}
-            }, 1500);
-
           } catch (err) {
             alert('請求失敗，請重試');
-            startBtn.disabled = false;
-            startBtn.classList.remove('opacity-50');
             isTesting = false;
           }
         }
