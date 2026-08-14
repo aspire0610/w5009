@@ -85,11 +85,16 @@ setInterval(() => {
     globalState.autoCheck.remainingSeconds--;
 
     if (globalState.autoCheck.remainingSeconds <= 0) {
-      // 重置倒數時間並發起測試
+      // 重置倒數時間
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
+      
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
+      
       if (selectedTargets.length > 0) {
+        broadcastLog(`⏰ [自動輪詢觸發] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
         runBackgroundTest(selectedTargets);
+      } else {
+        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
       }
     }
     broadcastLog(); // 廣播最新倒數秒數
@@ -237,6 +242,7 @@ app.post('/api/config-auto-check', (req, res) => {
   if (selectedIds) globalState.autoCheck.selectedIds = selectedIds;
   
   if (enabled) {
+    // 若重新開啟或設定，重置倒數
     globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   }
   
@@ -263,7 +269,7 @@ app.get('/api/stream-logs', (req, res) => {
   res.flushHeaders();
 
   sseClients.push(res);
-  broadcastLog(); // 立即同步
+  broadcastLog(); // 聯機後立刻發送當前狀態
 
   req.on('close', () => {
     sseClients = sseClients.filter(c => c !== res);
@@ -349,6 +355,11 @@ app.get('/', (req, res) => {
           renderCards();
           updateCount();
           initSSE();
+
+          // ⭐️ 初始化完成後，主動把前端目前勾選狀態同步給後端
+          setTimeout(() => {
+            syncAutoCheckToServer();
+          }, 500);
         }
 
         function initSSE() {
@@ -387,7 +398,7 @@ app.get('/', (req, res) => {
               if (data.percent === 100) setTimeout(() => progressContainer.classList.add('hidden'), 3000);
             }
 
-            // 同步後端倒數秒數
+            // 同步後端倒數秒數 UI
             if (data.autoCheck) {
               const toggle = document.getElementById('autoCheckToggle');
               const countdownText = document.getElementById('countdownText');
@@ -421,10 +432,11 @@ app.get('/', (req, res) => {
           };
         }
 
-        // 📱 螢幕亮起時重新連線，並自動同步電腦最新進度
+        // 📱 螢幕亮起或切回網頁時重新連線並強制同步後端設定
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') {
             initSSE();
+            syncAutoCheckToServer();
           }
         });
 
