@@ -306,7 +306,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       hasUtm = false;
     }
 
-    let statusMsg = httpStatus === 200 ? '正常(200)' : `異常(${httpStatus})`;
+    // 修正：如果狀態碼是 0，但實際網頁有順利載入且 UTM/GA4 正常，則視為正常載入
+    let statusMsg = '';
+    if (httpStatus === 200) {
+      statusMsg = '正常(200)';
+    } else if (httpStatus === 0 && (hasUtm || ga4Fired)) {
+      statusMsg = '正常(載入成功)';
+    } else {
+      statusMsg = `異常(${httpStatus})`;
+    }
+    
     if (isBlockedByWaf) statusMsg = '被WAF阻擋(403)';
 
     return {
@@ -386,7 +395,10 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
       }
       
-      const isPass = result.status === 200 && result.utmKept === '保留' && result.ga4Exist === '存在';
+      // 修正：將 status為0 但 UTM 與 GA4 正常的也判定為成功通過 (isPass)
+      const isStatusOk = (result.status === 200 || result.status === 0);
+      const isPass = isStatusOk && result.utmKept === '保留' && result.ga4Exist === '存在';
+      
       globalState.stats[item.id].total += 1;
       if (isPass) {
         globalState.stats[item.id].success += 1;
@@ -428,7 +440,6 @@ app.post('/api/config-auto-check', (req, res) => {
 
   globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   
-  // 重置已執行次數，若重新啟動
   if (enabled && globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
     globalState.autoCheck.currentRunCount = 0;
   }
@@ -539,7 +550,6 @@ app.get('/', (req, res) => {
               <option value="900">每 15 分鐘</option>
             </select>
             
-            <!-- 新增：輪詢次數設定選單 -->
             <select id="maxRunsSelect" onchange="syncAutoCheckToServer()" class="bg-slate-800 text-amber-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
               <option value="0" selected>無限次</option>
               <option value="10">限制 10 次</option>
@@ -675,9 +685,10 @@ app.get('/', (req, res) => {
             card.querySelector('.card-fail-count').textContent = stat.fail;
           }
 
+          const isOkStatus = (r.status === 200 || r.status === 0);
           const statusEl = card.querySelector('.status-val');
-          statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
-          statusEl.className = 'status-val font-bold ' + (r.status === 200 ? 'text-emerald-400' : 'text-rose-400');
+          statusEl.textContent = isOkStatus ? '✅ ' + r.statusText : '❌ ' + r.statusText;
+          statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
 
           const utmEl = card.querySelector('.utm-val');
           utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
@@ -691,7 +702,6 @@ app.get('/', (req, res) => {
         function renderCards() {
           const container = document.getElementById('cardsContainer');
           container.innerHTML = targets.map(t => {
-            // 擷取主網域（如 https://www.costco.com.tw）作為乾淨簡短的視覺呈現
             let displayDomain = t.url;
             try {
               const u = new URL(t.url);
@@ -704,9 +714,7 @@ app.get('/', (req, res) => {
                   <div class="flex items-start space-x-3 min-w-0 flex-1">
                     <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
                     <div class="min-w-0 flex-1">
-                      <!-- 完整的項目名稱 -->
                       <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
-                      <!-- 後方 URL 簡化顯示，滑鼠移上去時可看到完整網址 -->
                       <p class="text-xs text-slate-400 truncate mt-0.5" title="\${t.url}">🔗 \${displayDomain}</p>
                     </div>
                   </div>
