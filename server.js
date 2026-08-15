@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -6,6 +7,10 @@ const PORT = process.env.PORT || 3000;
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
+
+// 中間件解析
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // 預設監測網址清單 (完整 34 項)
 let targetList = [
@@ -127,14 +132,13 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯（結合 Stealth 外掛與優化超時設定）
+// Puppeteer 核心檢測邏輯（優化防拆機制與正確釋放記憶體）
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
   let ga4Fired = false;
 
   try {
-    // 啟動已掛載 Stealth 外掛的 puppeteer
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -147,6 +151,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         '--no-zygote',
         '--disable-gpu',
         '--single-process',
+        '--disable-blink-features=AutomationControlled',
         '--window-size=1366,768'
       ]
     });
@@ -163,7 +168,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-ch-ua-platform': '"Windows"'
     });
 
-    // 注入 OneTrust Cookie 避開彈窗阻擋
+    // 注入 Cookie 避開彈窗阻擋
     const domain = '.costco.com.tw';
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
@@ -178,7 +183,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 改用 networkidle2，並將 Timeout 調整為 45 秒
     const response = await page.goto(item.url, { 
       waitUntil: 'networkidle2', 
       timeout: 45000 
@@ -213,11 +217,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   } catch (error) {
     console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
 
-    if (page) await page.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-    
     // 重試 1 次機制
     if (retryCount < 1) {
+      if (page) await page.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
       await new Promise(r => setTimeout(r, 3000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -268,8 +271,7 @@ async function runBackgroundTest(selectedTargets) {
   broadcastLog(`✨ 檢測完成！(${new Date().toLocaleTimeString()})`);
 }
 
-app.use(express.json());
-
+// API 路由
 app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
@@ -284,7 +286,7 @@ app.post('/api/config-auto-check', (req, res) => {
     globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   }
   
-  broadcastLog(enabled ? `🔄 已開啟電腦端自動輪詢 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
+  broadcastLog(enabled ? `🔄 已開啟自動輪詢 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
@@ -314,6 +316,7 @@ app.get('/api/stream-logs', (req, res) => {
   });
 });
 
+// 首頁介面
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -592,4 +595,4 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 監測伺服器運作中 PORT: ${PORT}`));
