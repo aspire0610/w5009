@@ -40,7 +40,7 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// 全局狀態（移至後端掌控自動輪詢）
+// 全局狀態
 let globalState = {
   isRunning: false,
   currentLog: '',
@@ -59,7 +59,6 @@ let sseClients = [];
 
 /**
  * 廣播狀態給所有連線中的前端 (SSE)
- * 帶有清理已斷線 Client 的機制
  */
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
@@ -78,7 +77,6 @@ function broadcastLog(logText) {
 
   const data = `data: ${JSON.stringify(payload)}\n\n`;
 
-  // 廣播並過濾失效連線
   sseClients = sseClients.filter(client => {
     if (client.writableEnded || client.destroyed) return false;
     try {
@@ -90,13 +88,12 @@ function broadcastLog(logText) {
   });
 }
 
-// ⭐️ 後端掌控的定時器（每秒觸發一次倒數）
+// 後端掌控的定時器（每秒觸發一次倒數）
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
 
     if (globalState.autoCheck.remainingSeconds <= 0) {
-      // 重置倒數時間
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
@@ -108,11 +105,11 @@ setInterval(() => {
         broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
       }
     }
-    broadcastLog(); // 廣播最新倒數秒數
+    broadcastLog();
   }
 }, 1000);
 
-// SSE 心跳包：縮短至 10 秒發送一次，避免電信業者 NAT 閒置斷線
+// SSE 心跳包
 setInterval(() => {
   sseClients = sseClients.filter(client => {
     if (client.writableEnded || client.destroyed) return false;
@@ -125,15 +122,14 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯（優化 Render 記憶體）
+// Puppeteer 核心檢測邏輯
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
   let ga4Fired = false;
 
   try {
-    const puppeteerModule = await import('puppeteer');
-    const puppeteer = puppeteerModule.default || puppeteerModule;
+    const puppeteer = require('puppeteer');
 
     browser = await puppeteer.launch({
       headless: "new",
@@ -141,7 +137,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--disable-gpu',
-        '--single-process', // 優化防 Render RAM 爆掉
+        '--single-process',
         '--disable-blink-features=AutomationControlled', '--js-flags=--max-old-space-size=256'
       ]
     });
@@ -155,14 +151,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // 注入 OneTrust Cookie
     const domain = '.costco.com.tw';
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
       { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
     );
 
-    // 阻擋圖片媒體資源
     try {
       const client = await page.target().createCDPSession();
       await client.send('Network.enable');
@@ -206,9 +200,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     };
 
   } catch (error) {
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    
     if (retryCount < 1) {
-      if (page) await page.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
       await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -252,12 +247,10 @@ async function runBackgroundTest(selectedTargets) {
 
 app.use(express.json());
 
-// ⭐️ 防 Render 免費版 15 分鐘休眠專用端點 (請用 UptimeRobot 定時打這個 URL)
 app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// API: 開啟/關閉後端自動輪詢
 app.post('/api/config-auto-check', (req, res) => {
   const { enabled, intervalSeconds, selectedIds } = req.body;
   globalState.autoCheck.enabled = enabled;
@@ -272,7 +265,6 @@ app.post('/api/config-auto-check', (req, res) => {
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
-// 手動觸發一次測試
 app.post('/api/start-test', (req, res) => {
   if (globalState.isRunning) return res.status(400).json({ error: '測試正在進行中' });
   const ids = req.body.ids || [];
@@ -283,23 +275,22 @@ app.post('/api/start-test', (req, res) => {
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// SSE 串流 (優化 Render & 手機關螢幕重連機制)
 app.get('/api/stream-logs', (req, res) => {
+  req.setTimeout(0); // 防止 SSE 因為 Socket 逾時被強制關閉
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // 避免被 Render 反向代理快取
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
   sseClients.push(res);
-  broadcastLog(); // 聯機後立刻發送當前狀態
+  broadcastLog();
 
   req.on('close', () => {
     sseClients = sseClients.filter(c => c !== res);
   });
 });
 
-// 前端 UI
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -407,10 +398,13 @@ app.get('/', (req, res) => {
               document.getElementById('progressStatusText').innerText = data.log;
             }
 
-            // 進度條處理
+            // 進度條處理與自動清空暫存（修復輪詢計算 Bug）
             const startBtn = document.getElementById('startBtn');
             const progressContainer = document.getElementById('progressContainer');
             if (data.isRunning) {
+              if (data.current === 1) {
+                processedResultIds.clear(); // 每次測試剛開始時自動清空已紀錄 ID
+              }
               startBtn.disabled = true;
               startBtn.classList.add('opacity-50');
               progressContainer.classList.remove('hidden');
@@ -456,7 +450,6 @@ app.get('/', (req, res) => {
           };
         }
 
-        // 📱 螢幕亮起或切回網頁時重新連線並強制同步後端設定
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') {
             initSSE();
