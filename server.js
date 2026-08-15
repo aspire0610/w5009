@@ -1,9 +1,10 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 1. 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
+// 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
@@ -69,16 +70,25 @@ let sseClients = [];
 let globalBrowser = null;
 
 /**
- * 取得/管理 單一 Browser 實例（重用瀏覽器）
+ * 取得/管理 單一 Browser 實例（防卡死與重用瀏覽器）
  */
 async function getBrowserInstance() {
   if (globalBrowser && globalBrowser.isConnected()) {
     return globalBrowser;
   }
   
+  let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  
+  if (!executablePath) {
+    const renderChromePath = '/opt/render/project/src/.cache/puppeteer';
+    if (fs.existsSync(renderChromePath)) {
+      process.env.PUPPETEER_CACHE_DIR = renderChromePath;
+    }
+  }
+
   globalBrowser = await puppeteer.launch({
     headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    executablePath: executablePath || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -125,7 +135,7 @@ function broadcastLog(logText) {
   });
 }
 
-// 後端掌控的定時器（每秒觸發一次倒數）
+// 自動檢測排程計時器
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
@@ -159,7 +169,9 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯
+/**
+ * Puppeteer 核心檢測邏輯 (GA4 強化判定版)
+ */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
@@ -168,7 +180,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     const browser = await getBrowserInstance();
     page = await browser.newPage();
     
-    // 設置 30 秒 Timeout 限制
     page.setDefaultNavigationTimeout(30000);
 
     // 擬真 User-Agent 與 Header 設定
@@ -185,22 +196,30 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
-    // 注入 Cookie 避開彈窗阻擋
+    // 注入 Cookie 避開 Privacy/Cookie 彈窗擋住追蹤碼
     const domain = '.costco.com.tw';
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
       { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
     );
 
-    // GA4 封包監控
+    // 1. 強化版 GA4 / GTM 網路封包監控
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
-      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('googletagmanager.com') || reqUrl.includes('/collect') || reqUrl.includes('gtm.js')) {
+      if (
+        reqUrl.includes('google-analytics.com') ||
+        reqUrl.includes('analytics.google.com') ||
+        reqUrl.includes('googletagmanager.com') ||
+        reqUrl.includes('doubleclick.net') ||
+        reqUrl.includes('/g/collect') ||
+        reqUrl.includes('/collect') ||
+        reqUrl.includes('gtm.js')
+      ) {
         ga4Fired = true;
       }
     });
 
-    // 使用 domcontentloaded 避免被卡在長連線 / 影音資源加載
+    // 載入網頁
     const response = await page.goto(item.url, { 
       waitUntil: 'domcontentloaded', 
       timeout: 30000 
@@ -208,10 +227,35 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 模擬滑動頁面觸發 GA4 事件
-    await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
-    await new Promise(r => setTimeout(r, 2000));
+    // 2. 模擬真實使用者互動：滑動頁面 + 微幅移動滑鼠（觸發延遲載入 GA4）
+    await page.evaluate(async () => {
+      window.scrollBy(0, 400);
+      await new Promise(r => setTimeout(r, 500));
+      window.scrollBy(0, -200);
+    }).catch(() => {});
 
+    await page.mouse.move(100, 100).catch(() => {});
+    await page.mouse.move(200, 300).catch(() => {});
+
+    // 等待 3 秒讓追蹤碼有足夠時間發射 Request
+    await new Promise(r => setTimeout(r, 3000));
+
+    // 3. 雙重驗證：檢查前端 window.dataLayer 裡面是否有 GTM/GA4 初始化紀錄
+    if (!ga4Fired) {
+      const hasDataLayerGA = await page.evaluate(() => {
+        if (window.dataLayer && Array.isArray(window.dataLayer)) {
+          return window.dataLayer.some(entry => {
+            const str = JSON.stringify(entry).toLowerCase();
+            return str.includes('gtm') || str.includes('ga4') || str.includes('config') || str.includes('page_view');
+          });
+        }
+        return false;
+      }).catch(() => false);
+
+      if (hasDataLayerGA) ga4Fired = true;
+    }
+
+    // 檢查 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -228,17 +272,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     return {
-      id: item.id, name: item.name, url: item.url, status: httpStatus,
+      id: item.id, 
+      name: item.name, 
+      url: item.url, 
+      status: httpStatus,
       statusText: httpStatus === 200 ? '正常(200)' : `異常(${httpStatus})`,
-      utmKept: hasUtm ? '保留' : '丟失/未帶入', ga4Exist: ga4Fired ? '存在' : '缺失'
+      utmKept: hasUtm ? '保留' : '丟失/未帶入', 
+      ga4Exist: ga4Fired ? '存在' : '缺失'
     };
 
   } catch (error) {
     console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
 
-    if (page) await page.close().catch(() => {});
-
-    // 重試 1 次機制
     if (retryCount < 1) {
       await new Promise(r => setTimeout(r, 3000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
@@ -258,7 +303,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 伺服器背景測試任務
+// 背景測試執行器
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
   globalState.total = selectedTargets.length;
@@ -280,13 +325,13 @@ async function runBackgroundTest(selectedTargets) {
     globalState.results[item.id] = result;
     broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
 
-    // 調大爬蟲間隔（3.5 秒），避免觸發站方的 IP 頻率限制 (Rate Limit)
+    // 間隔 3.5 秒避免觸發頻率限制
     if (index < selectedTargets.length - 1) {
       await new Promise(r => setTimeout(r, 3500));
     }
   }
 
-  // 完成後重置 Browser，清空資源
+  // 完成後重新歸零 Browser 釋放記憶體
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
@@ -341,7 +386,7 @@ app.get('/api/stream-logs', (req, res) => {
   });
 });
 
-// 首頁介面 (前端修正了 SSE 連線洩漏問題)
+// 前端 UI 介面
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -427,9 +472,7 @@ app.get('/', (req, res) => {
         }
 
         function initSSE() {
-          if (evtSource && evtSource.readyState !== EventSource.CLOSED) {
-            return; // 避免重複創建 SSE 連線
-          }
+          if (evtSource && evtSource.readyState !== EventSource.CLOSED) return;
 
           evtSource = new EventSource('/api/stream-logs');
 
@@ -500,7 +543,6 @@ app.get('/', (req, res) => {
           };
         }
 
-        // 當頁面關閉或切換分頁時正確關閉連線
         window.addEventListener('beforeunload', () => {
           if (evtSource) evtSource.close();
         });
