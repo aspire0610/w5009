@@ -2,6 +2,11 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// 1. 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 // 預設監測網址清單 (完整 34 項)
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
@@ -122,15 +127,14 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯（優化防封鎖與 Timeout）
+// Puppeteer 核心檢測邏輯（結合 Stealth 外掛與優化超時設定）
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
   let ga4Fired = false;
 
   try {
-    const puppeteer = require('puppeteer');
-
+    // 啟動已掛載 Stealth 外掛的 puppeteer
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -143,7 +147,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         '--no-zygote',
         '--disable-gpu',
         '--single-process',
-        '--disable-blink-features=AutomationControlled',
         '--window-size=1366,768'
       ]
     });
@@ -158,10 +161,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-ch-ua': '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"Windows"'
-    });
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
     // 注入 OneTrust Cookie 避開彈窗阻擋
@@ -179,7 +178,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 改用 networkidle2 (放寬等待條件)，並將 Timeout 調整為 45 秒
+    // 改用 networkidle2，並將 Timeout 調整為 45 秒
     const response = await page.goto(item.url, { 
       waitUntil: 'networkidle2', 
       timeout: 45000 
@@ -217,6 +216,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (page) await page.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
     
+    // 重試 1 次機制
     if (retryCount < 1) {
       await new Promise(r => setTimeout(r, 3000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
@@ -330,7 +330,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer 無頭瀏覽器 · Cookie 預注入與 GA4 封包監控</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · Cookie 預注入與 GA4 封包監控</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
@@ -364,7 +364,7 @@ app.get('/', (req, res) => {
           <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
               <input type="checkbox" id="autoCheckToggle" onchange="syncAutoCheckToServer()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
-              <span class="text-slate-200 font-bold">🔄 後端自動輪詢</span>
+              <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
             </label>
             <select id="intervalSelect" onchange="syncAutoCheckToServer()" class="bg-slate-800 text-sky-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
               <option value="60" selected>每 1 分鐘</option>
