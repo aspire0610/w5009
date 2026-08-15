@@ -51,14 +51,14 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// 全局狀態（將統計數據統一放在 Server 端記錄）
+// 全局狀態
 let globalState = {
   isRunning: false,
   currentLog: '',
   total: 0,
   current: 0,
   results: {},
-  stats: {}, // 格式: { [id]: { total: 0, success: 0, fail: 0 } }
+  stats: {},
   autoCheck: {
     enabled: false,
     intervalSeconds: 60,
@@ -66,6 +66,9 @@ let globalState = {
     selectedIds: targetList.map(t => t.id)
   }
 };
+
+// 中斷測試鎖定標記
+let stopRequested = false;
 
 // 初始化統計資料結構
 targetList.forEach(t => {
@@ -170,7 +173,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (修正作用域與動態喚醒)
+ * Puppeteer 核心檢測邏輯 (支援 iframe 穿透與深度喚醒)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -196,7 +199,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
-    // 1. 網路封包監聽 (即時更新 Node.js 側的 ga4Fired 變數)
+    // 1. 網路封包監聽
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -235,74 +238,93 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       if (btn) btn.click();
     }).catch(() => {});
 
-    // 2. 通用喚醒：模擬真實使用者滾動與互動，強迫喚醒 GA4 / GTM Lazy Load
+    // 2. 多段式深度滾動喚醒
     await page.evaluate(async () => {
-      window.scrollTo(0, 500);
-      await new Promise(r => setTimeout(r, 400));
+      window.scrollTo(0, 300);
+      await new Promise(r => setTimeout(r, 300));
+      window.scrollTo(0, 800);
+      await new Promise(r => setTimeout(r, 300));
       window.scrollTo(0, 0);
-      
+
       window.dispatchEvent(new Event('resize'));
       document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
     }).catch(() => {});
 
-    // 3. 通用動態輪詢等待 (精準拆分 Node.js 側與 Browser 側檢查)
+    // 3. 跨 Frame (iframe) 動態輪詢監測
     const maxWaitTimeMs = 6000;
     const pollIntervalMs = 500;
     let elapsed = 0;
 
     while (elapsed < maxWaitTimeMs) {
-      // (A) 如果網路封包已抓到 GA4，直接跳出
-      if (ga4Fired) break;
+      if (ga4Fired || stopRequested) break;
 
-      // (B) 否則檢查 DOM 內的 window.dataLayer 或 GTM 物件
-      const hasDomGa4 = await page.evaluate(() => {
-        const dl = window.dataLayer;
-        const hasDL = Array.isArray(dl) && dl.length > 0;
-        const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
-        return hasDL || hasGTMObj;
-      }).catch(() => false);
+      const frames = page.frames();
+      for (const frame of frames) {
+        try {
+          const hasGaInFrame = await frame.evaluate(() => {
+            const dl = window.dataLayer;
+            const hasDL = Array.isArray(dl) && dl.length > 0;
+            const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
+            return hasDL || hasGTMObj;
+          });
 
-      if (hasDomGa4) {
-        ga4Fired = true;
-        break;
+          if (hasGaInFrame) {
+            ga4Fired = true;
+            break;
+          }
+        } catch (e) {}
       }
+
+      if (ga4Fired) break;
 
       await new Promise(r => setTimeout(r, pollIntervalMs));
       elapsed += pollIntervalMs;
     }
 
-    // 4. 取得 DOM 詳細分析
-    const pageAnalysis = await page.evaluate(() => {
-      const title = document.title || '';
-      const dl = window.dataLayer;
-      const hasDL = Array.isArray(dl) && dl.length > 0;
-      const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
-
-      const perfEntries = performance.getEntriesByType('resource').map(e => e.name.toLowerCase());
-      const hasPerfGA = perfEntries.some(url => 
-        url.includes('gtm') || url.includes('analytics') || url.includes('google') || url.includes('collect')
-      );
-
-      const scripts = Array.from(document.querySelectorAll('script')).map(s => (s.src + ' ' + s.textContent).toLowerCase());
-      const hasScriptGA = scripts.some(s => 
-        s.includes('googletagmanager') || s.includes('google-analytics') || s.includes('gtag') || s.includes('g-')
-      );
-
-      return { title, hasDL, hasGTMObj, hasPerfGA, hasScriptGA };
-    }).catch(() => null);
-
+    // 4. 全 Frame 狀態彙整
     let isBlockedByWaf = false;
-    if (pageAnalysis) {
-      if (pageAnalysis.title.includes('Access Denied') || pageAnalysis.title.includes('Attention Required') || httpStatus === 403) {
-        isBlockedByWaf = true;
-      }
+    let title = '';
+    let hasDL = false;
+    let hasGTMObj = false;
 
-      if (ga4Fired || pageAnalysis.hasDL || pageAnalysis.hasGTMObj || pageAnalysis.hasPerfGA || pageAnalysis.hasScriptGA) {
-        ga4Fired = true;
-      }
+    const frames = page.frames();
+    for (const frame of frames) {
+      try {
+        const analysis = await frame.evaluate(() => {
+          const t = document.title || '';
+          const dl = window.dataLayer;
+          const hDL = Array.isArray(dl) && dl.length > 0;
+          const hGTM = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
 
-      debugDetails = `[標題: ${pageAnalysis.title.slice(0, 15)}...] (DL:${pageAnalysis.hasDL ? '有' : '無'}, GTM物件:${pageAnalysis.hasGTMObj ? '有' : '無'})`;
+          const perfEntries = performance.getEntriesByType('resource').map(e => e.name.toLowerCase());
+          const hPerf = perfEntries.some(url => 
+            url.includes('gtm') || url.includes('analytics') || url.includes('google') || url.includes('collect')
+          );
+
+          const scripts = Array.from(document.querySelectorAll('script')).map(s => (s.src + ' ' + s.textContent).toLowerCase());
+          const hScript = scripts.some(s => 
+            s.includes('googletagmanager') || s.includes('google-analytics') || s.includes('gtag') || s.includes('g-')
+          );
+
+          return { t, hDL, hGTM, hPerf, hScript };
+        });
+
+        if (frame === page.mainFrame()) title = analysis.t;
+        if (analysis.hDL) hasDL = true;
+        if (analysis.hGTM) hasGTMObj = true;
+        if (analysis.hPerf || analysis.hScript) ga4Fired = true;
+      } catch (e) {}
     }
+
+    if (title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403) {
+      isBlockedByWaf = true;
+    }
+
+    if (ga4Fired || hasDL || hasGTMObj) {
+      ga4Fired = true;
+    }
+
+    debugDetails = `[標題: ${title.slice(0, 15)}...] (DL:${hasDL ? '有' : '無'}, GTM物件:${hasGTMObj ? '有' : '無'})`;
 
     const finalUrl = page.url();
     let hasUtm = false;
@@ -334,6 +356,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     };
 
   } catch (error) {
+    if (stopRequested) throw new Error('使用者手動中斷測試');
+
     console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
 
     if (retryCount < 1) {
@@ -356,15 +380,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 背景測試執行器
+// 背景測試執行器 (支援中斷機制)
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
+  stopRequested = false;
   globalState.total = selectedTargets.length;
   globalState.current = 0;
 
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
+    if (stopRequested) {
+      broadcastLog(`🛑 收到停止指令，測試已中斷！`);
+      break;
+    }
+
     if (!globalState.autoCheck.selectedIds.includes(item.id)) {
       console.log(`[Task ${item.id}] 未勾選，跳過檢測。`);
       continue;
@@ -377,8 +407,14 @@ async function runBackgroundTest(selectedTargets) {
     try {
       result = await checkUrlWithPuppeteer(item);
     } catch (err) {
+      if (stopRequested) {
+        broadcastLog(`🛑 測試中斷，已跳過後續項目`);
+        break;
+      }
       result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無', debugDetails: '' };
     }
+
+    if (stopRequested) break;
 
     if (globalState.autoCheck.selectedIds.includes(item.id)) {
       globalState.results[item.id] = result;
@@ -399,7 +435,7 @@ async function runBackgroundTest(selectedTargets) {
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
     }
 
-    if (index < selectedTargets.length - 1) {
+    if (index < selectedTargets.length - 1 && !stopRequested) {
       await new Promise(r => setTimeout(r, 2000));
     }
   }
@@ -410,7 +446,9 @@ async function runBackgroundTest(selectedTargets) {
   }
 
   globalState.isRunning = false;
-  broadcastLog(`✨ 檢測完成！(${new Date().toLocaleTimeString()})`);
+  if (!stopRequested) {
+    broadcastLog(`✨ 檢測完成！(${new Date().toLocaleTimeString()})`);
+  }
 }
 
 // API 路由
@@ -439,6 +477,23 @@ app.post('/api/start-test', (req, res) => {
 
   runBackgroundTest(selectedTargets);
   res.json({ success: true, message: '背景測試已開始' });
+});
+
+// 新增：停止測試 API
+app.post('/api/stop-test', async (req, res) => {
+  if (!globalState.isRunning) {
+    return res.json({ success: true, message: '目前無正在執行的測試' });
+  }
+
+  stopRequested = true;
+  broadcastLog(`🛑 使用者請求停止測試中...`);
+
+  if (globalBrowser) {
+    await globalBrowser.close().catch(() => {});
+    globalBrowser = null;
+  }
+
+  res.json({ success: true, message: '已發送中斷請求' });
 });
 
 app.get('/api/stream-logs', (req, res) => {
@@ -476,7 +531,7 @@ app.get('/', (req, res) => {
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 五重 GA4 備援與全網頁自動喚醒版</p>
           </div>
-          <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
+          <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
 
         <div id="progressContainer" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 space-y-1.5">
@@ -527,6 +582,7 @@ app.get('/', (req, res) => {
       <script>
         let targets = [];
         let evtSource = null;
+        let isRunningState = false;
 
         async function init() {
           const res = await fetch('/api/targets');
@@ -562,18 +618,23 @@ app.get('/', (req, res) => {
               document.getElementById('progressStatusText').innerText = data.log;
             }
 
-            const startBtn = document.getElementById('startBtn');
+            const actionBtn = document.getElementById('actionBtn');
             const progressContainer = document.getElementById('progressContainer');
+            
+            isRunningState = data.isRunning;
+
             if (data.isRunning) {
-              startBtn.disabled = true;
-              startBtn.classList.add('opacity-50');
+              actionBtn.innerText = '🛑 停止測試';
+              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 w-full sm:w-auto transition';
               progressContainer.classList.remove('hidden');
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
               document.getElementById('progressPercentText').innerText = \`\${data.percent}%\`;
             } else {
-              startBtn.disabled = false;
-              startBtn.classList.remove('opacity-50');
-              if (data.percent === 100) setTimeout(() => progressContainer.classList.add('hidden'), 3000);
+              actionBtn.innerText = '🚀 執行測試';
+              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition';
+              if (data.percent === 100 || data.percent === 0) {
+                setTimeout(() => progressContainer.classList.add('hidden'), 3000);
+              }
             }
 
             if (data.autoCheck) {
@@ -656,8 +717,9 @@ app.get('/', (req, res) => {
                 <div class="flex items-start space-x-3 min-w-0 flex-1">
                   <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
                   <div class="min-w-0 flex-1">
-                    <h3 class="font-bold text-base text-slate-100 truncate">\${t.name}</h3>
-                    <p class="text-xs text-slate-400 truncate">\${t.url}</p>
+                    <!-- 移除 truncate，加入 break-words 確保全畫面上長標題完整呈現不被打斷 -->
+                    <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
+                    <p class="text-xs text-slate-400 break-all mt-0.5">\${t.url}</p>
                   </div>
                 </div>
 
@@ -697,19 +759,29 @@ app.get('/', (req, res) => {
           document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
         }
 
-        async function runTest() {
-          const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
-          if (selected.length === 0) return alert('請至少勾選一個項目！');
+        async function toggleTest() {
+          if (isRunningState) {
+            // 執行停止
+            try {
+              await fetch('/api/stop-test', { method: 'POST' });
+            } catch (err) {
+              alert('停止請求失敗');
+            }
+          } else {
+            // 執行測試
+            const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
+            if (selected.length === 0) return alert('請至少勾選一個項目！');
 
-          try {
-            const startRes = await fetch('/api/start-test', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ids: selected })
-            });
-            if (!startRes.ok) alert('啟動失敗');
-          } catch (err) {
-            alert('請求失敗，請重試');
+            try {
+              const startRes = await fetch('/api/start-test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: selected })
+              });
+              if (!startRes.ok) alert('啟動失敗');
+            } catch (err) {
+              alert('請求失敗，請重試');
+            }
           }
         }
 
