@@ -118,7 +118,7 @@ function broadcastLog(logText) {
     current: globalState.current,
     total: globalState.total,
     results: globalState.results,
-    stats: globalState.stats, // 將確切統計數字推送給前端
+    stats: globalState.stats,
     autoCheck: globalState.autoCheck
   };
 
@@ -170,7 +170,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (GA4 強化判定)
+ * Puppeteer 核心檢測邏輯 (通用全網址動態喚醒與偵測)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -228,20 +228,45 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
+    // 關閉 Cookie 提示視窗
     await page.evaluate(() => {
       const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"]');
       if (btn) btn.click();
     }).catch(() => {});
 
+    // 【升級】：通用喚醒機制 (對所有網址執行滾動與事件發送，強迫觸發 Lazy Load / SPA 延遲載入)
     await page.evaluate(async () => {
-      window.scrollBy(0, 400);
+      window.scrollTo(0, 500);
       await new Promise(r => setTimeout(r, 400));
-      window.scrollBy(0, -200);
+      window.scrollTo(0, 0);
+      
+      window.dispatchEvent(new Event('resize'));
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
     }).catch(() => {});
 
-    // 提高等待時間至 4.5 秒，確保 GA4 延遲封包完畢
-    await new Promise(r => setTimeout(r, 4500));
+    // 【升級】：通用動態等待機制 (最長等待 6 秒，但只要 GA4 一觸發就立刻往下執行，兼顧準確與速度)
+    const maxWaitTimeMs = 6000;
+    const pollIntervalMs = 500;
+    let elapsed = 0;
 
+    while (elapsed < maxWaitTimeMs) {
+      const hasGa4Now = ga4Fired || await page.evaluate(() => {
+        const dl = window.dataLayer;
+        const hasDL = Array.isArray(dl) && dl.length > 0;
+        const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
+        return hasDL || hasGTMObj;
+      }).catch(() => false);
+
+      if (hasGa4Now) {
+        ga4Fired = true;
+        break; // 已經捕獲 GA4，直接跳出等待，不浪費時間！
+      }
+
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+      elapsed += pollIntervalMs;
+    }
+
+    // 取得 DOM 詳細分析
     const pageAnalysis = await page.evaluate(() => {
       const title = document.title || '';
       const dl = window.dataLayer;
@@ -271,7 +296,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         ga4Fired = true;
       }
 
-      debugDetails = `[標題: ${pageAnalysis.title.slice(0, 15)}...] (DL:${pageAnalysis.hasDL ? '有' : '無'}, GTM物件:${pageAnalysis.hasGTMObj ? '有' : '無'}, Script:${pageAnalysis.hasScriptGA ? '有' : '無'})`;
+      debugDetails = `[標題: ${pageAnalysis.title.slice(0, 15)}...] (DL:${pageAnalysis.hasDL ? '有' : '無'}, GTM物件:${pageAnalysis.hasGTMObj ? '有' : '無'})`;
     }
 
     const finalUrl = page.url();
@@ -326,7 +351,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 背景測試執行器 (嚴格進行內部計數與取消攔截)
+// 背景測試執行器
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
   globalState.total = selectedTargets.length;
@@ -335,7 +360,6 @@ async function runBackgroundTest(selectedTargets) {
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
-    // 若取消勾選，直接跳過不跑
     if (!globalState.autoCheck.selectedIds.includes(item.id)) {
       console.log(`[Task ${item.id}] 未勾選，跳過檢測。`);
       continue;
@@ -354,7 +378,6 @@ async function runBackgroundTest(selectedTargets) {
     if (globalState.autoCheck.selectedIds.includes(item.id)) {
       globalState.results[item.id] = result;
 
-      // 【核心修復】：計數統計直接在 Server 結算！
       if (!globalState.stats[item.id]) {
         globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
       }
@@ -372,7 +395,7 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1) {
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
@@ -429,7 +452,7 @@ app.get('/api/stream-logs', (req, res) => {
   });
 });
 
-// 前端 UI 介面（徹底簡化，將次數統計邏輯完全交給 Server，廢除前端的累加計算）
+// 前端 UI 介面
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -446,7 +469,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 五重 GA4 備援診斷版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 五重 GA4 備援與全網頁自動喚醒版</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
@@ -570,7 +593,6 @@ app.get('/', (req, res) => {
               }
             }
 
-            // 更新結果卡片（統計數字與狀態直接由 Server 數據更新，絕不自己累加）
             if (data.results) {
               Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id], data.stats ? data.stats[id] : null));
             }
@@ -602,7 +624,6 @@ app.get('/', (req, res) => {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          // 核心修復：直接渲染 Server 算好的統計，防止數字狂跳
           if (stat) {
             card.querySelector('.card-total-count').textContent = stat.total;
             card.querySelector('.card-success-count').textContent = stat.success;
