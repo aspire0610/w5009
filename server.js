@@ -170,19 +170,20 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (GA4 終極深度檢測版)
+ * Puppeteer 核心檢測邏輯 (GA4 寬鬆與五重備援診斷版)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
+  let debugDetails = '';
 
   try {
     const browser = await getBrowserInstance();
     page = await browser.newPage();
     
-    page.setDefaultNavigationTimeout(30000);
+    page.setDefaultNavigationTimeout(35000);
 
-    // 擬真 User-Agent 與 Header
+    // 擬真 User-Agent 與 Header 降低被 WAF 阻擋機率
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
     await page.setExtraHTTPHeaders({
@@ -196,82 +197,100 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
-    // 預先注入 Cookie 避開 Privacy 彈窗
-    const domain = '.costco.com.tw';
-    await page.setCookie(
-      { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
-      { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
-    );
-
-    // 1. 全方位封包監控（比對 URL + POST Body 中的 GA4 協定特徵）
+    // 1. 全方位封包攔截（極寬鬆比對：包含 google, analytics, gtm, collect 等關鍵字）
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
       
-      // 特徵 A: 傳統 Google Analytics / GTM 網域
-      const isGoogleDomain = /google-analytics\.com|analytics\.google\.com|googletagmanager\.com|doubleclick\.net/i.test(reqUrl);
-      
-      // 特徵 B: GA4 測量協定參數 (v=2 且包含 tid=G- 或 gtm=)
-      const hasGA4Params = (reqUrl.includes('v=2') || postData.includes('v=2')) && 
-                           (reqUrl.includes('tid=g-') || postData.includes('tid=g-') || reqUrl.includes('gtm=') || postData.includes('gtm='));
-
-      // 特徵 C: Server-Side GTM / 第一方收集路徑
-      const isCollectPath = reqUrl.includes('/collect') || reqUrl.includes('/g/collect') || reqUrl.includes('gtm.js');
-
-      if (isGoogleDomain || hasGA4Params || isCollectPath) {
+      if (
+        reqUrl.includes('google-analytics') ||
+        reqUrl.includes('googletagmanager') ||
+        reqUrl.includes('analytics') ||
+        reqUrl.includes('doubleclick') ||
+        reqUrl.includes('/collect') ||
+        reqUrl.includes('gtm.js') ||
+        reqUrl.includes('gtag') ||
+        reqUrl.includes('v=2') ||
+        postData.includes('v=2') ||
+        reqUrl.includes('tid=g-') ||
+        postData.includes('tid=g-') ||
+        reqUrl.includes('gtm=') ||
+        postData.includes('gtm=')
+      ) {
         ga4Fired = true;
       }
     });
 
-    // 載入網頁
-    const response = await page.goto(item.url, { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 30000 
-    });
+    // 載入網頁 (優先嘗試 networkidle2)
+    let response = null;
+    try {
+      response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 });
+    } catch (e) {
+      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => null);
+    }
 
     const httpStatus = response ? response.status() : 0;
 
-    // 2. 自動點擊 Cookie 同意按鈕（若有跳出彈窗）
+    // 自動點擊 Cookie 同意按鈕
     await page.evaluate(() => {
-      const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"], button[class*="accept"]');
+      const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"]');
       if (btn) btn.click();
     }).catch(() => {});
 
-    // 3. 模擬滑動與滑鼠移動，觸發 Lazy Load 腳本
+    // 模擬真實滾動
     await page.evaluate(async () => {
-      window.scrollBy(0, 500);
+      window.scrollBy(0, 400);
       await new Promise(r => setTimeout(r, 400));
       window.scrollBy(0, -200);
     }).catch(() => {});
 
-    await page.mouse.move(150, 150).catch(() => {});
-    
-    // 留 4 秒讓非同步 Request 順利發出
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 3000));
 
-    // 4. 深度備援檢測：若網路層沒攔截到，檢查頁面記憶體中的 GTM / GA4 物件與 DOM 腳本
-    if (!ga4Fired) {
-      const hasInPageGA = await page.evaluate(() => {
-        // 檢查全域變數
-        const hasObjects = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
-        
-        // 檢查 dataLayer
-        let hasDL = false;
-        if (window.dataLayer && Array.isArray(window.dataLayer)) {
-          hasDL = window.dataLayer.some(entry => {
-            const str = typeof entry === 'object' ? JSON.stringify(entry) : String(entry);
-            return /gtm|ga4|config|page_view|event|G-/i.test(str);
-          });
-        }
+    // 2. 深度診斷 DOM、Performance API 與 全域變數
+    const pageAnalysis = await page.evaluate(() => {
+      const title = document.title || '';
+      
+      // 檢查 window.dataLayer
+      const dl = window.dataLayer;
+      const hasDL = Array.isArray(dl) && dl.length > 0;
 
-        // 檢查 HTML 中是否掛載了 GTM/GA 腳本
-        const scripts = Array.from(document.querySelectorAll('script')).map(s => s.src || s.innerHTML || '');
-        const hasScript = scripts.some(s => /googletagmanager|google-analytics|gtag/i.test(s));
+      // 檢查 GTM / GA 全域物件
+      const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
 
-        return hasObjects || hasDL || hasScript;
-      }).catch(() => false);
+      // 檢查 Performance Resource Timing API
+      const perfEntries = performance.getEntriesByType('resource').map(e => e.name.toLowerCase());
+      const hasPerfGA = perfEntries.some(url => 
+        url.includes('gtm') || url.includes('analytics') || url.includes('google') || url.includes('collect')
+      );
 
-      if (hasInPageGA) ga4Fired = true;
+      // 檢查 HTML 中的 Script 標籤
+      const scripts = Array.from(document.querySelectorAll('script')).map(s => (s.src + ' ' + s.textContent).toLowerCase());
+      const hasScriptGA = scripts.some(s => 
+        s.includes('googletagmanager') || s.includes('google-analytics') || s.includes('gtag') || s.includes('g-')
+      );
+
+      return {
+        title,
+        hasDL,
+        hasGTMObj,
+        hasPerfGA,
+        hasScriptGA
+      };
+    }).catch(() => null);
+
+    let isBlockedByWaf = false;
+    if (pageAnalysis) {
+      // 判斷是否被 Akamai / Cloudflare 等 WAF 防火牆檔下
+      if (pageAnalysis.title.includes('Access Denied') || pageAnalysis.title.includes('Attention Required') || httpStatus === 403) {
+        isBlockedByWaf = true;
+      }
+
+      // 只要五種途徑任一命中，即算 GA4 存在
+      if (ga4Fired || pageAnalysis.hasDL || pageAnalysis.hasGTMObj || pageAnalysis.hasPerfGA || pageAnalysis.hasScriptGA) {
+        ga4Fired = true;
+      }
+
+      debugDetails = `[標題: ${pageAnalysis.title.slice(0, 15)}...] (DL:${pageAnalysis.hasDL ? '有' : '無'}, GTM物件:${pageAnalysis.hasGTMObj ? '有' : '無'}, Script:${pageAnalysis.hasScriptGA ? '有' : '無'})`;
     }
 
     // 檢查 UTM 參數
@@ -290,21 +309,25 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       hasUtm = false;
     }
 
+    let statusMsg = httpStatus === 200 ? '正常(200)' : `異常(${httpStatus})`;
+    if (isBlockedByWaf) statusMsg = '被WAF阻擋(403)';
+
     return {
       id: item.id, 
       name: item.name, 
       url: item.url, 
       status: httpStatus,
-      statusText: httpStatus === 200 ? '正常(200)' : `異常(${httpStatus})`,
+      statusText: statusMsg,
       utmKept: hasUtm ? '保留' : '丟失/未帶入', 
-      ga4Exist: ga4Fired ? '存在' : '缺失'
+      ga4Exist: ga4Fired ? '存在' : '缺失',
+      debugDetails: debugDetails
     };
 
   } catch (error) {
     console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
 
     if (retryCount < 1) {
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
     
@@ -313,9 +336,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       name: item.name, 
       url: item.url, 
       status: 0, 
-      statusText: error.message.includes('Timeout') ? '連線逾時(30s)' : '被擋/連線失敗', 
+      statusText: error.message.includes('Timeout') ? '連線逾時' : '連線失敗', 
       utmKept: '無', 
-      ga4Exist: '無' 
+      ga4Exist: '無',
+      debugDetails: error.message
     };
   } finally {
     if (page) await page.close().catch(() => {});
@@ -338,15 +362,16 @@ async function runBackgroundTest(selectedTargets) {
     try {
       result = await checkUrlWithPuppeteer(item);
     } catch (err) {
-      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無' };
+      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無', debugDetails: '' };
     }
 
     globalState.results[item.id] = result;
-    broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
+    const logInfo = result.debugDetails ? ` (${result.statusText} | ${result.debugDetails})` : ` (${result.statusText})`;
+    broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
 
-    // 間隔 3.5 秒避免觸發頻率限制
+    // 間隔 3 秒避免觸發頻率限制
     if (index < selectedTargets.length - 1) {
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 
@@ -422,7 +447,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · Cookie 預注入與 GA4 雙重檢測版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 五重 GA4 備援診斷版</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
@@ -442,7 +467,7 @@ app.get('/', (req, res) => {
             <span>> Terminal Real-time Logs</span>
             <span id="sseStatus" class="text-emerald-500 font-bold">● 連線正常</span>
           </div>
-          <div id="terminalBox" class="h-20 overflow-y-auto space-y-1 text-slate-300">
+          <div id="terminalBox" class="h-24 overflow-y-auto space-y-1 text-slate-300">
             <div>> 等待發起測試...</div>
           </div>
         </div>
