@@ -70,7 +70,7 @@ let sseClients = [];
 let globalBrowser = null;
 
 /**
- * 取得/管理 單一 Browser 實例（防卡死與重用瀏覽器）
+ * 取得/管理 單一 Browser 實例
  */
 async function getBrowserInstance() {
   if (globalBrowser && globalBrowser.isConnected()) {
@@ -135,7 +135,7 @@ function broadcastLog(logText) {
   });
 }
 
-// 自動檢測排程計時器
+// 自動檢測排程計時器 (修復點：每次精確過濾與終止判斷)
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
@@ -143,6 +143,7 @@ setInterval(() => {
     if (globalState.autoCheck.remainingSeconds <= 0) {
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
+      // 動態即時取出有被勾選的 Target
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
       
       if (selectedTargets.length > 0) {
@@ -170,7 +171,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (GA4 寬鬆與五重備援診斷版)
+ * Puppeteer 核心檢測邏輯
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -183,7 +184,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     page.setDefaultNavigationTimeout(35000);
 
-    // 擬真 User-Agent 與 Header 降低被 WAF 阻擋機率
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
     await page.setExtraHTTPHeaders({
@@ -197,7 +197,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
-    // 1. 全方位封包攔截（極寬鬆比對：包含 google, analytics, gtm, collect 等關鍵字）
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -221,7 +220,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 載入網頁 (優先嘗試 networkidle2)
     let response = null;
     try {
       response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 });
@@ -231,13 +229,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 自動點擊 Cookie 同意按鈕
     await page.evaluate(() => {
       const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"]');
       if (btn) btn.click();
     }).catch(() => {});
 
-    // 模擬真實滾動
     await page.evaluate(async () => {
       window.scrollBy(0, 400);
       await new Promise(r => setTimeout(r, 400));
@@ -246,46 +242,31 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // 2. 深度診斷 DOM、Performance API 與 全域變數
     const pageAnalysis = await page.evaluate(() => {
       const title = document.title || '';
-      
-      // 檢查 window.dataLayer
       const dl = window.dataLayer;
       const hasDL = Array.isArray(dl) && dl.length > 0;
-
-      // 檢查 GTM / GA 全域物件
       const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
 
-      // 檢查 Performance Resource Timing API
       const perfEntries = performance.getEntriesByType('resource').map(e => e.name.toLowerCase());
       const hasPerfGA = perfEntries.some(url => 
         url.includes('gtm') || url.includes('analytics') || url.includes('google') || url.includes('collect')
       );
 
-      // 檢查 HTML 中的 Script 標籤
       const scripts = Array.from(document.querySelectorAll('script')).map(s => (s.src + ' ' + s.textContent).toLowerCase());
       const hasScriptGA = scripts.some(s => 
         s.includes('googletagmanager') || s.includes('google-analytics') || s.includes('gtag') || s.includes('g-')
       );
 
-      return {
-        title,
-        hasDL,
-        hasGTMObj,
-        hasPerfGA,
-        hasScriptGA
-      };
+      return { title, hasDL, hasGTMObj, hasPerfGA, hasScriptGA };
     }).catch(() => null);
 
     let isBlockedByWaf = false;
     if (pageAnalysis) {
-      // 判斷是否被 Akamai / Cloudflare 等 WAF 防火牆檔下
       if (pageAnalysis.title.includes('Access Denied') || pageAnalysis.title.includes('Attention Required') || httpStatus === 403) {
         isBlockedByWaf = true;
       }
 
-      // 只要五種途徑任一命中，即算 GA4 存在
       if (ga4Fired || pageAnalysis.hasDL || pageAnalysis.hasGTMObj || pageAnalysis.hasPerfGA || pageAnalysis.hasScriptGA) {
         ga4Fired = true;
       }
@@ -293,7 +274,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       debugDetails = `[標題: ${pageAnalysis.title.slice(0, 15)}...] (DL:${pageAnalysis.hasDL ? '有' : '無'}, GTM物件:${pageAnalysis.hasGTMObj ? '有' : '無'}, Script:${pageAnalysis.hasScriptGA ? '有' : '無'})`;
     }
 
-    // 檢查 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -346,7 +326,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 背景測試執行器
+// 背景測試執行器 (修復點：迴圈中動態檢查是否被使用者取消勾選)
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
   globalState.total = selectedTargets.length;
@@ -355,6 +335,12 @@ async function runBackgroundTest(selectedTargets) {
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
+    // 【修復關鍵】：判斷該項目在執行瞬間是否已被使用者取消勾選
+    if (!globalState.autoCheck.selectedIds.includes(item.id)) {
+      console.log(`[Task ${item.id}] 使用者已取消勾選，跳過檢測。`);
+      continue;
+    }
+
     globalState.current = index + 1;
     broadcastLog(`[${index + 1}/${selectedTargets.length}] 模擬開啟中: ${item.name}...`);
     
@@ -365,9 +351,14 @@ async function runBackgroundTest(selectedTargets) {
       result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無', debugDetails: '' };
     }
 
-    globalState.results[item.id] = result;
-    const logInfo = result.debugDetails ? ` (${result.statusText} | ${result.debugDetails})` : ` (${result.statusText})`;
-    broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
+    // 非同步跑完後二次檢查，防範檢測期間取消勾選
+    if (globalState.autoCheck.selectedIds.includes(item.id)) {
+      globalState.results[item.id] = result;
+      const logInfo = result.debugDetails ? ` (${result.statusText} | ${result.debugDetails})` : ` (${result.statusText})`;
+      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
+    } else {
+      console.log(`[Task ${item.id}] 檢測完成但項目已被取消勾選，捨棄結果。`);
+    }
 
     // 間隔 3 秒避免觸發頻率限制
     if (index < selectedTargets.length - 1) {
@@ -390,17 +381,24 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
 
+// 【修復關鍵】：開啟/切換設定時完全同步狀態，防範廢棄的 Timer ID 殘留
 app.post('/api/config-auto-check', (req, res) => {
   const { enabled, intervalSeconds, selectedIds } = req.body;
-  globalState.autoCheck.enabled = enabled;
-  if (intervalSeconds) globalState.autoCheck.intervalSeconds = parseInt(intervalSeconds, 10);
-  if (selectedIds) globalState.autoCheck.selectedIds = selectedIds;
   
-  if (enabled) {
-    globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
+  globalState.autoCheck.enabled = !!enabled;
+  
+  if (intervalSeconds) {
+    globalState.autoCheck.intervalSeconds = parseInt(intervalSeconds, 10);
   }
   
-  broadcastLog(enabled ? `🔄 已開啟自動輪詢 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
+  if (Array.isArray(selectedIds)) {
+    globalState.autoCheck.selectedIds = selectedIds;
+  }
+
+  // 切換時重置剩餘秒數
+  globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
+  
+  broadcastLog(globalState.autoCheck.enabled ? `🔄 已更新自動輪詢設定 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
