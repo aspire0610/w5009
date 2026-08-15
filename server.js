@@ -122,7 +122,7 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯
+// Puppeteer 核心檢測邏輯（優化防封鎖與 Timeout）
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let browser = null;
   let page = null;
@@ -135,36 +135,43 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
-        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--disable-gpu',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
         '--single-process',
-        '--disable-blink-features=AutomationControlled', '--js-flags=--max-old-space-size=256'
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1366,768'
       ]
     });
 
     page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    
+    // 擬真 User-Agent 與 Header 設定
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
-    await page.setExtraHTTPHeaders({ 'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7' });
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      'sec-ch-ua': '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"'
+    });
 
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
+    // 注入 OneTrust Cookie 避開彈窗阻擋
     const domain = '.costco.com.tw';
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
       { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
     );
 
-    try {
-      const client = await page.target().createCDPSession();
-      await client.send('Network.enable');
-      await client.send('Network.setBlockedUrlPatterns', {
-        patterns: ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.svg', '*.woff', '*.woff2', '*.ttf', '*.otf', '*.mp4', '*.webm']
-      });
-    } catch (cdpErr) {}
-
+    // GA4 封包監控
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('googletagmanager.com') || reqUrl.includes('/collect') || reqUrl.includes('gtm.js')) {
@@ -172,11 +179,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    const response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // 改用 networkidle2 (放寬等待條件)，並將 Timeout 調整為 45 秒
+    const response = await page.goto(item.url, { 
+      waitUntil: 'networkidle2', 
+      timeout: 45000 
+    });
+
     const httpStatus = response ? response.status() : 0;
 
     await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
 
     const finalUrl = page.url();
     let hasUtm = false;
@@ -200,14 +212,25 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     };
 
   } catch (error) {
+    console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
+
     if (page) await page.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
     
     if (retryCount < 1) {
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
-    return { id: item.id, name: item.name, url: item.url, status: 0, statusText: '連線逾時/失敗', utmKept: '無', ga4Exist: '無' };
+    
+    return { 
+      id: item.id, 
+      name: item.name, 
+      url: item.url, 
+      status: 0, 
+      statusText: error.message.includes('Timeout') ? '連線逾時(45s)' : '被擋/連線失敗', 
+      utmKept: '無', 
+      ga4Exist: '無' 
+    };
   } finally {
     if (page) await page.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
@@ -276,7 +299,7 @@ app.post('/api/start-test', (req, res) => {
 });
 
 app.get('/api/stream-logs', (req, res) => {
-  req.setTimeout(0); // 防止 SSE 因為 Socket 逾時被強制關閉
+  req.setTimeout(0);
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -398,12 +421,11 @@ app.get('/', (req, res) => {
               document.getElementById('progressStatusText').innerText = data.log;
             }
 
-            // 進度條處理與自動清空暫存（修復輪詢計算 Bug）
             const startBtn = document.getElementById('startBtn');
             const progressContainer = document.getElementById('progressContainer');
             if (data.isRunning) {
               if (data.current === 1) {
-                processedResultIds.clear(); // 每次測試剛開始時自動清空已紀錄 ID
+                processedResultIds.clear();
               }
               startBtn.disabled = true;
               startBtn.classList.add('opacity-50');
@@ -416,7 +438,6 @@ app.get('/', (req, res) => {
               if (data.percent === 100) setTimeout(() => progressContainer.classList.add('hidden'), 3000);
             }
 
-            // 同步後端倒數秒數 UI
             if (data.autoCheck) {
               const toggle = document.getElementById('autoCheckToggle');
               const countdownText = document.getElementById('countdownText');
