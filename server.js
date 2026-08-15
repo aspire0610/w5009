@@ -63,14 +63,14 @@ let globalState = {
     enabled: false,
     intervalSeconds: 60,
     remainingSeconds: 0,
+    maxRuns: 0, // 0 代表無限次
+    currentRunCount: 0,
     selectedIds: targetList.map(t => t.id)
   }
 };
 
-// 中斷測試鎖定標記
 let stopRequested = false;
 
-// 初始化統計資料結構
 targetList.forEach(t => {
   globalState.stats[t.id] = { total: 0, success: 0, fail: 0 };
 });
@@ -138,7 +138,7 @@ function broadcastLog(logText) {
   });
 }
 
-// 自動檢測倒數定時器
+// 自動檢測倒數與次數控制定時器
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
@@ -146,10 +146,19 @@ setInterval(() => {
     if (globalState.autoCheck.remainingSeconds <= 0) {
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
+      // 檢查是否已達設定的輪詢次數上限
+      if (globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
+        globalState.autoCheck.enabled = false;
+        broadcastLog(`🏁 已達到設定的輪詢次數上限 (${globalState.autoCheck.maxRuns} 次)，自動輪詢已停止。`);
+        return;
+      }
+
+      globalState.autoCheck.currentRunCount++;
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
       
+      const maxText = globalState.autoCheck.maxRuns > 0 ? `/${globalState.autoCheck.maxRuns}` : '';
       if (selectedTargets.length > 0) {
-        broadcastLog(`⏰ [自動輪詢觸發] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
+        broadcastLog(`⏰ [自動輪詢第 ${globalState.autoCheck.currentRunCount}${maxText} 次] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
         runBackgroundTest(selectedTargets);
       } else {
         broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
@@ -173,7 +182,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (強化 GA4/GTM 觸發判定)
+ * Puppeteer 核心檢測邏輯
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -185,17 +194,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     page.setDefaultNavigationTimeout(35000);
 
-    // 1. 偽裝成真人的 User-Agent 與 Navigator 屬性
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
-    // 繞過 WebDriver 自動化標記檢測
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
       window.chrome = { runtime: {} };
     });
 
-    // 2. 網路封包監聽 (抓取 Google Analytics / GTM / Doubleclick 封包)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -216,7 +222,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 3. 載入頁面
     let response = null;
     try {
       response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -226,7 +231,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 4. 自動點擊常見 Cookie / 隱私權聲明同意按鈕
     await page.evaluate(() => {
       const selectors = [
         '#onetrust-accept-btn-handler',
@@ -242,7 +246,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     }).catch(() => {});
 
-    // 5. 模擬真人深度互動 (解開因 Lazy Load / User Interaction 觸發的 GA4)
     await page.evaluate(async () => {
       window.scrollTo(0, 300);
       await new Promise(r => setTimeout(r, 300));
@@ -250,14 +253,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       await new Promise(r => setTimeout(r, 500));
       window.scrollTo(0, 0);
 
-      // 強制觸發 DOM 事件
       ['scroll', 'mousemove', 'touchmove', 'click'].forEach(evt => {
         window.dispatchEvent(new Event(evt));
         document.dispatchEvent(new Event(evt));
       });
     }).catch(() => {});
 
-    // 6. 輪詢檢查 DOM 物件與 dataLayer 狀態
     const maxWaitTimeMs = 8000;
     const pollIntervalMs = 500;
     let elapsed = 0;
@@ -286,12 +287,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += pollIntervalMs;
     }
 
-    // 7. 檢查頁面標題與 WAF 阻擋狀態
     let title = '';
     try { title = await page.title(); } catch (e) {}
     const isBlockedByWaf = title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403;
 
-    // 8. 驗證 URL 中的 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -344,7 +343,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 背景測試執行器 (支援中斷機制)
+// 背景測試執行器
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
   stopRequested = false;
@@ -420,15 +419,22 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 app.get('/api/targets', (req, res) => res.json(targetList));
 
 app.post('/api/config-auto-check', (req, res) => {
-  const { enabled, intervalSeconds, selectedIds } = req.body;
+  const { enabled, intervalSeconds, maxRuns, selectedIds } = req.body;
   
   globalState.autoCheck.enabled = !!enabled;
   if (intervalSeconds) globalState.autoCheck.intervalSeconds = parseInt(intervalSeconds, 10);
+  if (maxRuns !== undefined) globalState.autoCheck.maxRuns = parseInt(maxRuns, 10);
   if (Array.isArray(selectedIds)) globalState.autoCheck.selectedIds = selectedIds;
 
   globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   
-  broadcastLog(globalState.autoCheck.enabled ? `🔄 已更新自動輪詢設定 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
+  // 重置已執行次數，若重新啟動
+  if (enabled && globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
+    globalState.autoCheck.currentRunCount = 0;
+  }
+
+  const maxRunsMsg = globalState.autoCheck.maxRuns > 0 ? ` (上限 ${globalState.autoCheck.maxRuns} 次)` : ' (無限次)';
+  broadcastLog(globalState.autoCheck.enabled ? `🔄 已更新自動輪詢設定: 每 ${globalState.autoCheck.intervalSeconds} 秒${maxRunsMsg}` : `🛑 已關閉自動輪詢`);
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
@@ -442,7 +448,6 @@ app.post('/api/start-test', (req, res) => {
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// 停止測試 API
 app.post('/api/stop-test', async (req, res) => {
   if (!globalState.isRunning) {
     return res.json({ success: true, message: '目前無正在執行的測試' });
@@ -523,7 +528,7 @@ app.get('/', (req, res) => {
             <span>全選 / 全不選</span>
           </label>
 
-          <div class="flex items-center space-x-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
+          <div class="flex items-center flex-wrap gap-2 text-xs bg-slate-900/80 p-2 rounded-lg border border-slate-700">
             <label class="flex items-center space-x-1.5 cursor-pointer">
               <input type="checkbox" id="autoCheckToggle" onchange="syncAutoCheckToServer()" class="w-4 h-4 rounded text-sky-500 bg-slate-900 border-slate-700">
               <span class="text-slate-200 font-bold">🔄 自動輪詢</span>
@@ -533,6 +538,15 @@ app.get('/', (req, res) => {
               <option value="300">每 5 分鐘</option>
               <option value="900">每 15 分鐘</option>
             </select>
+            
+            <!-- 新增：輪詢次數設定選單 -->
+            <select id="maxRunsSelect" onchange="syncAutoCheckToServer()" class="bg-slate-800 text-amber-400 font-semibold rounded border border-slate-700 px-2 py-1 outline-none text-xs">
+              <option value="0" selected>無限次</option>
+              <option value="10">限制 10 次</option>
+              <option value="20">限制 20 次</option>
+              <option value="50">限制 50 次</option>
+            </select>
+
             <span id="countdownText" class="text-slate-500 text-xs font-mono">(未開啟)</span>
           </div>
 
@@ -613,7 +627,8 @@ app.get('/', (req, res) => {
                   const sec = data.autoCheck.remainingSeconds;
                   const m = Math.floor(sec / 60);
                   const s = sec % 60;
-                  countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')} 後觸發\`;
+                  const runsInfo = data.autoCheck.maxRuns > 0 ? \` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})\` : '';
+                  countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}\`;
                   countdownText.className = 'text-amber-400 font-mono font-bold';
                 }
               } else {
@@ -640,12 +655,13 @@ app.get('/', (req, res) => {
         async function syncAutoCheckToServer() {
           const enabled = document.getElementById('autoCheckToggle').checked;
           const intervalSeconds = document.getElementById('intervalSelect').value;
+          const maxRuns = document.getElementById('maxRunsSelect').value;
           const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
 
           await fetch('/api/config-auto-check', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled, intervalSeconds, selectedIds: selected })
+            body: JSON.stringify({ enabled, intervalSeconds, maxRuns, selectedIds: selected })
           });
         }
 
@@ -674,40 +690,51 @@ app.get('/', (req, res) => {
 
         function renderCards() {
           const container = document.getElementById('cardsContainer');
-          container.innerHTML = targets.map(t => \`
-            <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
-              <div class="flex items-start justify-between space-x-3 gap-2">
-                <div class="flex items-start space-x-3 min-w-0 flex-1">
-                  <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
-                  <div class="min-w-0 flex-1">
-                    <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
-                    <p class="text-xs text-slate-400 break-all mt-0.5">\${t.url}</p>
+          container.innerHTML = targets.map(t => {
+            // 擷取主網域（如 https://www.costco.com.tw）作為乾淨簡短的視覺呈現
+            let displayDomain = t.url;
+            try {
+              const u = new URL(t.url);
+              displayDomain = u.origin + u.pathname.substring(0, 15) + '...';
+            } catch(e) {}
+
+            return \`
+              <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
+                <div class="flex items-start justify-between space-x-3 gap-2">
+                  <div class="flex items-start space-x-3 min-w-0 flex-1">
+                    <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
+                    <div class="min-w-0 flex-1">
+                      <!-- 完整的項目名稱 -->
+                      <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
+                      <!-- 後方 URL 簡化顯示，滑鼠移上去時可看到完整網址 -->
+                      <p class="text-xs text-slate-400 truncate mt-0.5" title="\${t.url}">🔗 \${displayDomain}</p>
+                    </div>
+                  </div>
+
+                  <div class="text-right text-xs shrink-0 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 font-mono">
+                    <span class="text-slate-400">已測: </span>
+                    <span class="card-total-count font-bold text-sky-400">0</span> 次
+                    <span class="text-slate-500 ml-1">(<span class="card-success-count text-emerald-400">0</span> 成功 / <span class="card-fail-count text-rose-400">0</span> 失敗)</span>
                   </div>
                 </div>
 
-                <div class="text-right text-xs shrink-0 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 font-mono">
-                  <span class="text-slate-400">已測: </span>
-                  <span class="card-total-count font-bold text-sky-400">0</span> 次
-                  <span class="text-slate-500 ml-1">(<span class="card-success-count text-emerald-400">0</span> 成功 / <span class="card-fail-count text-rose-400">0</span> 失敗)</span>
+                <div class="grid grid-cols-3 gap-2 text-center text-xs">
+                  <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                    <div class="text-slate-400 mb-1">連線狀態</div>
+                    <span class="status-val font-bold text-slate-300">⚪ 未測</span>
+                  </div>
+                  <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                    <div class="text-slate-400 mb-1">UTM參數</div>
+                    <span class="utm-val font-bold text-slate-300">⚪ 未測</span>
+                  </div>
+                  <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
+                    <div class="text-slate-400 mb-1">GA4觸發</div>
+                    <span class="ga-val font-bold text-slate-300">⚪ 未測</span>
+                  </div>
                 </div>
               </div>
-
-              <div class="grid grid-cols-3 gap-2 text-center text-xs">
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">連線狀態</div>
-                  <span class="status-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">UTM參數</div>
-                  <span class="utm-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-                <div class="bg-slate-900/80 p-2.5 rounded-lg border border-slate-700/50">
-                  <div class="text-slate-400 mb-1">GA4觸發</div>
-                  <span class="ga-val font-bold text-slate-300">⚪ 未測</span>
-                </div>
-              </div>
-            </div>
-          \`).join('');
+            \`;
+          }).join('');
         }
 
         function toggleSelectAll(master) {
