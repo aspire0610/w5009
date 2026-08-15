@@ -1,16 +1,19 @@
 {
-  "name": "my-test-server",
+  "name": "costco-utm-monitor",
   "version": "1.0.0",
-  "description": "Single-file Node.js Express server for local testing",
-  "main": "server.js",
+  "description": "Costco UTM & GA4 Monitor using Puppeteer Stealth",
+  "main": "app.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node app.js",
+    "build": "npx puppeteer browsers install chrome"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "puppeteer": "^22.10.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
