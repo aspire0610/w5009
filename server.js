@@ -170,7 +170,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (通用全網址動態喚醒與偵測)
+ * Puppeteer 核心檢測邏輯 (修正作用域與動態喚醒)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -196,6 +196,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
+    // 1. 網路封包監聽 (即時更新 Node.js 側的 ga4Fired 變數)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -234,7 +235,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       if (btn) btn.click();
     }).catch(() => {});
 
-    // 【升級】：通用喚醒機制 (對所有網址執行滾動與事件發送，強迫觸發 Lazy Load / SPA 延遲載入)
+    // 2. 通用喚醒：模擬真實使用者滾動與互動，強迫喚醒 GA4 / GTM Lazy Load
     await page.evaluate(async () => {
       window.scrollTo(0, 500);
       await new Promise(r => setTimeout(r, 400));
@@ -244,29 +245,33 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
     }).catch(() => {});
 
-    // 【升級】：通用動態等待機制 (最長等待 6 秒，但只要 GA4 一觸發就立刻往下執行，兼顧準確與速度)
+    // 3. 通用動態輪詢等待 (精準拆分 Node.js 側與 Browser 側檢查)
     const maxWaitTimeMs = 6000;
     const pollIntervalMs = 500;
     let elapsed = 0;
 
     while (elapsed < maxWaitTimeMs) {
-      const hasGa4Now = ga4Fired || await page.evaluate(() => {
+      // (A) 如果網路封包已抓到 GA4，直接跳出
+      if (ga4Fired) break;
+
+      // (B) 否則檢查 DOM 內的 window.dataLayer 或 GTM 物件
+      const hasDomGa4 = await page.evaluate(() => {
         const dl = window.dataLayer;
         const hasDL = Array.isArray(dl) && dl.length > 0;
         const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
         return hasDL || hasGTMObj;
       }).catch(() => false);
 
-      if (hasGa4Now) {
+      if (hasDomGa4) {
         ga4Fired = true;
-        break; // 已經捕獲 GA4，直接跳出等待，不浪費時間！
+        break;
       }
 
       await new Promise(r => setTimeout(r, pollIntervalMs));
       elapsed += pollIntervalMs;
     }
 
-    // 取得 DOM 詳細分析
+    // 4. 取得 DOM 詳細分析
     const pageAnalysis = await page.evaluate(() => {
       const title = document.title || '';
       const dl = window.dataLayer;
