@@ -173,12 +173,11 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (支援 iframe 穿透與深度喚醒)
+ * Puppeteer 核心檢測邏輯 (強化 GA4/GTM 觸發判定)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
-  let debugDetails = '';
 
   try {
     const browser = await getBrowserInstance();
@@ -186,86 +185,93 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     page.setDefaultNavigationTimeout(35000);
 
+    // 1. 偽裝成真人的 User-Agent 與 Navigator 屬性
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'sec-ch-ua': '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
-      'sec-fetch-dest': 'document',
-      'sec-fetch-mode': 'navigate',
-      'sec-fetch-site': 'none',
-      'sec-fetch-user': '?1'
+
+    // 繞過 WebDriver 自動化標記檢測
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      window.chrome = { runtime: {} };
     });
 
-    // 1. 網路封包監聽
+    // 2. 網路封包監聽 (抓取 Google Analytics / GTM / Doubleclick 封包)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
       
-      if (
-        reqUrl.includes('google-analytics') ||
-        reqUrl.includes('googletagmanager') ||
-        reqUrl.includes('analytics') ||
-        reqUrl.includes('doubleclick') ||
-        reqUrl.includes('/collect') ||
-        reqUrl.includes('gtm.js') ||
-        reqUrl.includes('gtag') ||
-        reqUrl.includes('v=2') ||
-        postData.includes('v=2') ||
-        reqUrl.includes('tid=g-') ||
-        postData.includes('tid=g-') ||
-        reqUrl.includes('gtm=') ||
-        postData.includes('gtm=')
-      ) {
+      const isGaRequest = 
+        reqUrl.includes('google-analytics.com') || 
+        reqUrl.includes('analytics.google.com') ||
+        reqUrl.includes('googletagmanager.com') ||
+        reqUrl.includes('/collect') || 
+        reqUrl.includes('gtm.js') || 
+        reqUrl.includes('gtag/js') ||
+        reqUrl.includes('v=2') || postData.includes('v=2') ||
+        reqUrl.includes('tid=g-') || postData.includes('tid=g-') ||
+        reqUrl.includes('gtm=');
+
+      if (isGaRequest) {
         ga4Fired = true;
       }
     });
 
+    // 3. 載入頁面
     let response = null;
     try {
-      response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 });
+      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     } catch (e) {
-      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => null);
+      response = await page.goto(item.url, { waitUntil: 'load', timeout: 15000 }).catch(() => null);
     }
 
     const httpStatus = response ? response.status() : 0;
 
-    // 關閉 Cookie 提示視窗
+    // 4. 自動點擊常見 Cookie / 隱私權聲明同意按鈕
     await page.evaluate(() => {
-      const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"]');
-      if (btn) btn.click();
+      const selectors = [
+        '#onetrust-accept-btn-handler',
+        '#accept-recommended-btn-handler',
+        '.optanon-allow-all',
+        'button[id*="accept"]',
+        'button[class*="accept"]',
+        '.cookie-accept'
+      ];
+      selectors.forEach(s => {
+        const btn = document.querySelector(s);
+        if (btn) btn.click();
+      });
     }).catch(() => {});
 
-    // 2. 多段式深度滾動喚醒
+    // 5. 模擬真人深度互動 (解開因 Lazy Load / User Interaction 觸發的 GA4)
     await page.evaluate(async () => {
       window.scrollTo(0, 300);
       await new Promise(r => setTimeout(r, 300));
-      window.scrollTo(0, 800);
-      await new Promise(r => setTimeout(r, 300));
+      window.scrollTo(0, 1000);
+      await new Promise(r => setTimeout(r, 500));
       window.scrollTo(0, 0);
 
-      window.dispatchEvent(new Event('resize'));
-      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      // 強制觸發 DOM 事件
+      ['scroll', 'mousemove', 'touchmove', 'click'].forEach(evt => {
+        window.dispatchEvent(new Event(evt));
+        document.dispatchEvent(new Event(evt));
+      });
     }).catch(() => {});
 
-    // 3. 跨 Frame (iframe) 動態輪詢監測
-    const maxWaitTimeMs = 6000;
+    // 6. 輪詢檢查 DOM 物件與 dataLayer 狀態
+    const maxWaitTimeMs = 8000;
     const pollIntervalMs = 500;
     let elapsed = 0;
 
     while (elapsed < maxWaitTimeMs) {
       if (ga4Fired || stopRequested) break;
 
-      const frames = page.frames();
-      for (const frame of frames) {
+      for (const frame of page.frames()) {
         try {
           const hasGaInFrame = await frame.evaluate(() => {
-            const dl = window.dataLayer;
-            const hasDL = Array.isArray(dl) && dl.length > 0;
-            const hasGTMObj = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
-            return hasDL || hasGTMObj;
+            const hasDataLayer = Array.isArray(window.dataLayer) && window.dataLayer.length > 0;
+            const hasGTM = !!(window.google_tag_manager || window.gtag || window.ga || window.GoogleAnalyticsObject);
+            const hasEvents = hasDataLayer && window.dataLayer.some(e => e.event === 'gtm.js' || e.event === 'page_view' || e[0] === 'config');
+            return hasDataLayer || hasGTM || hasEvents;
           });
 
           if (hasGaInFrame) {
@@ -276,56 +282,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
 
       if (ga4Fired) break;
-
       await new Promise(r => setTimeout(r, pollIntervalMs));
       elapsed += pollIntervalMs;
     }
 
-    // 4. 全 Frame 狀態彙整
-    let isBlockedByWaf = false;
+    // 7. 檢查頁面標題與 WAF 阻擋狀態
     let title = '';
-    let hasDL = false;
-    let hasGTMObj = false;
+    try { title = await page.title(); } catch (e) {}
+    const isBlockedByWaf = title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403;
 
-    const frames = page.frames();
-    for (const frame of frames) {
-      try {
-        const analysis = await frame.evaluate(() => {
-          const t = document.title || '';
-          const dl = window.dataLayer;
-          const hDL = Array.isArray(dl) && dl.length > 0;
-          const hGTM = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
-
-          const perfEntries = performance.getEntriesByType('resource').map(e => e.name.toLowerCase());
-          const hPerf = perfEntries.some(url => 
-            url.includes('gtm') || url.includes('analytics') || url.includes('google') || url.includes('collect')
-          );
-
-          const scripts = Array.from(document.querySelectorAll('script')).map(s => (s.src + ' ' + s.textContent).toLowerCase());
-          const hScript = scripts.some(s => 
-            s.includes('googletagmanager') || s.includes('google-analytics') || s.includes('gtag') || s.includes('g-')
-          );
-
-          return { t, hDL, hGTM, hPerf, hScript };
-        });
-
-        if (frame === page.mainFrame()) title = analysis.t;
-        if (analysis.hDL) hasDL = true;
-        if (analysis.hGTM) hasGTMObj = true;
-        if (analysis.hPerf || analysis.hScript) ga4Fired = true;
-      } catch (e) {}
-    }
-
-    if (title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403) {
-      isBlockedByWaf = true;
-    }
-
-    if (ga4Fired || hasDL || hasGTMObj) {
-      ga4Fired = true;
-    }
-
-    debugDetails = `[標題: ${title.slice(0, 15)}...] (DL:${hasDL ? '有' : '無'}, GTM物件:${hasGTMObj ? '有' : '無'})`;
-
+    // 8. 驗證 URL 中的 UTM 參數
     const finalUrl = page.url();
     let hasUtm = false;
     try {
@@ -351,8 +317,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       status: httpStatus,
       statusText: statusMsg,
       utmKept: hasUtm ? '保留' : '丟失/未帶入', 
-      ga4Exist: ga4Fired ? '存在' : '缺失',
-      debugDetails: debugDetails
+      ga4Exist: ga4Fired ? '存在' : '缺失'
     };
 
   } catch (error) {
@@ -372,8 +337,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       status: 0, 
       statusText: error.message.includes('Timeout') ? '連線逾時' : '連線失敗', 
       utmKept: '無', 
-      ga4Exist: '無',
-      debugDetails: error.message
+      ga4Exist: '無'
     };
   } finally {
     if (page) await page.close().catch(() => {});
@@ -411,7 +375,7 @@ async function runBackgroundTest(selectedTargets) {
         broadcastLog(`🛑 測試中斷，已跳過後續項目`);
         break;
       }
-      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無', debugDetails: '' };
+      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無' };
     }
 
     if (stopRequested) break;
@@ -431,8 +395,7 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id].fail += 1;
       }
 
-      const logInfo = result.debugDetails ? ` (${result.statusText} | ${result.debugDetails})` : ` (${result.statusText})`;
-      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
+      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
@@ -479,7 +442,7 @@ app.post('/api/start-test', (req, res) => {
   res.json({ success: true, message: '背景測試已開始' });
 });
 
-// 新增：停止測試 API
+// 停止測試 API
 app.post('/api/stop-test', async (req, res) => {
   if (!globalState.isRunning) {
     return res.json({ success: true, message: '目前無正在執行的測試' });
@@ -529,7 +492,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 五重 GA4 備援與全網頁自動喚醒版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 真人行為模擬與完整 GA4 偵測版</p>
           </div>
           <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
@@ -717,7 +680,6 @@ app.get('/', (req, res) => {
                 <div class="flex items-start space-x-3 min-w-0 flex-1">
                   <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
                   <div class="min-w-0 flex-1">
-                    <!-- 移除 truncate，加入 break-words 確保全畫面上長標題完整呈現不被打斷 -->
                     <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
                     <p class="text-xs text-slate-400 break-all mt-0.5">\${t.url}</p>
                   </div>
@@ -761,14 +723,12 @@ app.get('/', (req, res) => {
 
         async function toggleTest() {
           if (isRunningState) {
-            // 執行停止
             try {
               await fetch('/api/stop-test', { method: 'POST' });
             } catch (err) {
               alert('停止請求失敗');
             }
           } else {
-            // 執行測試
             const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
             if (selected.length === 0) return alert('請至少勾選一個項目！');
 
@@ -793,4 +753,3 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`🚀 監測伺服器運作中 PORT: ${PORT}`));
-
