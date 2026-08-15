@@ -170,7 +170,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯 (GA4 強化判定版)
+ * Puppeteer 核心檢測邏輯 (GA4 終極深度檢測版)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -182,7 +182,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     page.setDefaultNavigationTimeout(30000);
 
-    // 擬真 User-Agent 與 Header 設定
+    // 擬真 User-Agent 與 Header
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
     await page.setExtraHTTPHeaders({
@@ -196,25 +196,29 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-fetch-user': '?1'
     });
 
-    // 注入 Cookie 避開 Privacy/Cookie 彈窗擋住追蹤碼
+    // 預先注入 Cookie 避開 Privacy 彈窗
     const domain = '.costco.com.tw';
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: domain, path: '/' },
       { name: 'OptanonConsent', value: 'isGpcEnabled=0&datavalue=1&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: domain, path: '/' }
     );
 
-    // 1. 強化版 GA4 / GTM 網路封包監控
+    // 1. 全方位封包監控（比對 URL + POST Body 中的 GA4 協定特徵）
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
-      if (
-        reqUrl.includes('google-analytics.com') ||
-        reqUrl.includes('analytics.google.com') ||
-        reqUrl.includes('googletagmanager.com') ||
-        reqUrl.includes('doubleclick.net') ||
-        reqUrl.includes('/g/collect') ||
-        reqUrl.includes('/collect') ||
-        reqUrl.includes('gtm.js')
-      ) {
+      const postData = (request.postData() || '').toLowerCase();
+      
+      // 特徵 A: 傳統 Google Analytics / GTM 網域
+      const isGoogleDomain = /google-analytics\.com|analytics\.google\.com|googletagmanager\.com|doubleclick\.net/i.test(reqUrl);
+      
+      // 特徵 B: GA4 測量協定參數 (v=2 且包含 tid=G- 或 gtm=)
+      const hasGA4Params = (reqUrl.includes('v=2') || postData.includes('v=2')) && 
+                           (reqUrl.includes('tid=g-') || postData.includes('tid=g-') || reqUrl.includes('gtm=') || postData.includes('gtm='));
+
+      // 特徵 C: Server-Side GTM / 第一方收集路徑
+      const isCollectPath = reqUrl.includes('/collect') || reqUrl.includes('/g/collect') || reqUrl.includes('gtm.js');
+
+      if (isGoogleDomain || hasGA4Params || isCollectPath) {
         ga4Fired = true;
       }
     });
@@ -227,32 +231,47 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 2. 模擬真實使用者互動：滑動頁面 + 微幅移動滑鼠（觸發延遲載入 GA4）
+    // 2. 自動點擊 Cookie 同意按鈕（若有跳出彈窗）
+    await page.evaluate(() => {
+      const btn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler, .optanon-allow-all, button[id*="accept"], button[class*="accept"]');
+      if (btn) btn.click();
+    }).catch(() => {});
+
+    // 3. 模擬滑動與滑鼠移動，觸發 Lazy Load 腳本
     await page.evaluate(async () => {
-      window.scrollBy(0, 400);
-      await new Promise(r => setTimeout(r, 500));
+      window.scrollBy(0, 500);
+      await new Promise(r => setTimeout(r, 400));
       window.scrollBy(0, -200);
     }).catch(() => {});
 
-    await page.mouse.move(100, 100).catch(() => {});
-    await page.mouse.move(200, 300).catch(() => {});
+    await page.mouse.move(150, 150).catch(() => {});
+    
+    // 留 4 秒讓非同步 Request 順利發出
+    await new Promise(r => setTimeout(r, 4000));
 
-    // 等待 3 秒讓追蹤碼有足夠時間發射 Request
-    await new Promise(r => setTimeout(r, 3000));
-
-    // 3. 雙重驗證：檢查前端 window.dataLayer 裡面是否有 GTM/GA4 初始化紀錄
+    // 4. 深度備援檢測：若網路層沒攔截到，檢查頁面記憶體中的 GTM / GA4 物件與 DOM 腳本
     if (!ga4Fired) {
-      const hasDataLayerGA = await page.evaluate(() => {
+      const hasInPageGA = await page.evaluate(() => {
+        // 檢查全域變數
+        const hasObjects = !!(window.google_tag_manager || window.gtag || window.ga || window.google_tag_data);
+        
+        // 檢查 dataLayer
+        let hasDL = false;
         if (window.dataLayer && Array.isArray(window.dataLayer)) {
-          return window.dataLayer.some(entry => {
-            const str = JSON.stringify(entry).toLowerCase();
-            return str.includes('gtm') || str.includes('ga4') || str.includes('config') || str.includes('page_view');
+          hasDL = window.dataLayer.some(entry => {
+            const str = typeof entry === 'object' ? JSON.stringify(entry) : String(entry);
+            return /gtm|ga4|config|page_view|event|G-/i.test(str);
           });
         }
-        return false;
+
+        // 檢查 HTML 中是否掛載了 GTM/GA 腳本
+        const scripts = Array.from(document.querySelectorAll('script')).map(s => s.src || s.innerHTML || '');
+        const hasScript = scripts.some(s => /googletagmanager|google-analytics|gtag/i.test(s));
+
+        return hasObjects || hasDL || hasScript;
       }).catch(() => false);
 
-      if (hasDataLayerGA) ga4Fired = true;
+      if (hasInPageGA) ga4Fired = true;
     }
 
     // 檢查 UTM 參數
@@ -403,7 +422,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · Cookie 預注入與 GA4 封包監控</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · Cookie 預注入與 GA4 雙重檢測版</p>
           </div>
           <button onclick="runTest()" id="startBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
         </div>
