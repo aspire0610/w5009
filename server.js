@@ -63,7 +63,7 @@ let globalState = {
     enabled: false,
     intervalSeconds: 60,
     remainingSeconds: 0,
-    maxRuns: 0, // 0 代表無限次
+    maxRuns: 0,
     currentRunCount: 0,
     selectedIds: targetList.map(t => t.id)
   }
@@ -138,7 +138,7 @@ function broadcastLog(logText) {
   });
 }
 
-// 自動檢測倒數與次數控制定時器
+// 自動檢測定時器
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
@@ -146,7 +146,6 @@ setInterval(() => {
     if (globalState.autoCheck.remainingSeconds <= 0) {
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
-      // 檢查是否已達設定的輪詢次數上限
       if (globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
         globalState.autoCheck.enabled = false;
         broadcastLog(`🏁 已達到設定的輪詢次數上限 (${globalState.autoCheck.maxRuns} 次)，自動輪詢已停止。`);
@@ -306,7 +305,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       hasUtm = false;
     }
 
-    // 修正：如果狀態碼是 0，但實際網頁有順利載入且 UTM/GA4 正常，則視為正常載入
     let statusMsg = '';
     if (httpStatus === 200) {
       statusMsg = '正常(200)';
@@ -359,6 +357,9 @@ async function runBackgroundTest(selectedTargets) {
   globalState.total = selectedTargets.length;
   globalState.current = 0;
 
+  // 每次開始新測試前，清空當前的單次測試結果 (保留次數 stats)
+  globalState.results = {};
+
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
@@ -395,7 +396,6 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
       }
       
-      // 修正：將 status為0 但 UTM 與 GA4 正常的也判定為成功通過 (isPass)
       const isStatusOk = (result.status === 200 || result.status === 0);
       const isPass = isStatusOk && result.utmKept === '保留' && result.ga4Exist === '存在';
       
@@ -563,7 +563,8 @@ app.get('/', (req, res) => {
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
         </div>
 
-        <div id="cardsContainer" class="space-y-3"></div>
+        <!-- 卡片容器 -->
+        <div id="cardsContainer" class="flex flex-col gap-3"></div>
       </div>
 
       <script>
@@ -576,6 +577,7 @@ app.get('/', (req, res) => {
           targets = await res.json();
           renderCards();
           updateCount();
+          reorderCards(); // 排序卡片
           initSSE();
 
           setTimeout(() => {
@@ -647,8 +649,22 @@ app.get('/', (req, res) => {
               }
             }
 
+            // 更新歷史累積次數
+            if (data.stats) {
+              Object.keys(data.stats).forEach(id => {
+                const card = document.getElementById('card-' + id);
+                if (card) {
+                  const stat = data.stats[id];
+                  card.querySelector('.card-total-count').textContent = stat.total;
+                  card.querySelector('.card-success-count').textContent = stat.success;
+                  card.querySelector('.card-fail-count').textContent = stat.fail;
+                }
+              });
+            }
+
+            // 更新最新測試結果
             if (data.results) {
-              Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id], data.stats ? data.stats[id] : null));
+              Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id]));
             }
           };
 
@@ -675,15 +691,9 @@ app.get('/', (req, res) => {
           });
         }
 
-        function updateCardUI(id, r, stat) {
+        function updateCardUI(id, r) {
           const card = document.getElementById('card-' + id);
           if (!card) return;
-
-          if (stat) {
-            card.querySelector('.card-total-count').textContent = stat.total;
-            card.querySelector('.card-success-count').textContent = stat.success;
-            card.querySelector('.card-fail-count').textContent = stat.fail;
-          }
 
           const isOkStatus = (r.status === 200 || r.status === 0);
           const statusEl = card.querySelector('.status-val');
@@ -699,6 +709,26 @@ app.get('/', (req, res) => {
           gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
         }
 
+        // 清空 UI 上的當前測試結果 (保持次數)
+        function resetUIResults() {
+          document.querySelectorAll('.target-checkbox:checked').forEach(cb => {
+            const card = document.getElementById('card-' + cb.value);
+            if (card) {
+              const statusEl = card.querySelector('.status-val');
+              statusEl.textContent = '⚪ 未測';
+              statusEl.className = 'status-val font-bold text-slate-300';
+
+              const utmEl = card.querySelector('.utm-val');
+              utmEl.textContent = '⚪ 未測';
+              utmEl.className = 'utm-val font-bold text-slate-300';
+
+              const gaEl = card.querySelector('.ga-val');
+              gaEl.textContent = '⚪ 未測';
+              gaEl.className = 'ga-val font-bold text-slate-300';
+            }
+          });
+        }
+
         function renderCards() {
           const container = document.getElementById('cardsContainer');
           container.innerHTML = targets.map(t => {
@@ -709,10 +739,10 @@ app.get('/', (req, res) => {
             } catch(e) {}
 
             return \`
-              <div id="card-\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3">
+              <div id="card-\${t.id}" data-id="\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3 transition-all duration-300">
                 <div class="flex items-start justify-between space-x-3 gap-2">
                   <div class="flex items-start space-x-3 min-w-0 flex-1">
-                    <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="updateCount(); syncAutoCheckToServer();">
+                    <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="onCheckboxChange()">
                     <div class="min-w-0 flex-1">
                       <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
                       <p class="text-xs text-slate-400 truncate mt-0.5" title="\${t.url}">🔗 \${displayDomain}</p>
@@ -745,9 +775,35 @@ app.get('/', (req, res) => {
           }).join('');
         }
 
+        // 監聽勾選變更
+        function onCheckboxChange() {
+          updateCount();
+          reorderCards();
+          syncAutoCheckToServer();
+        }
+
+        // 卡片置頂排序邏輯 (已勾選在上，未勾選在下，並保持原始 ID 順序)
+        function reorderCards() {
+          const container = document.getElementById('cardsContainer');
+          const cards = Array.from(container.children);
+
+          cards.sort((a, b) => {
+            const checkedA = a.querySelector('.target-checkbox').checked;
+            const checkedB = b.querySelector('.target-checkbox').checked;
+
+            if (checkedA === checkedB) {
+              return parseInt(a.dataset.id) - parseInt(b.dataset.id);
+            }
+            return checkedA ? -1 : 1;
+          });
+
+          cards.forEach(card => container.appendChild(card));
+        }
+
         function toggleSelectAll(master) {
           document.querySelectorAll('.target-checkbox').forEach(cb => cb.checked = master.checked);
           updateCount();
+          reorderCards();
           syncAutoCheckToServer();
         }
 
@@ -766,6 +822,9 @@ app.get('/', (req, res) => {
           } else {
             const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
             if (selected.length === 0) return alert('請至少勾選一個項目！');
+
+            // 啟動測試時先重置 UI 顯示結果 (保留歷史次數)
+            resetUIResults();
 
             try {
               const startRes = await fetch('/api/start-test', {
