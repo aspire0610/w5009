@@ -51,13 +51,14 @@ let targetList = [
   { id: "34", name: "fy26p12w3 Showroom (電腦桌椅)", url: "https://www.costco.com.tw/Furniture-Kitchen/Furniture/Computer-Desk-Chair-Sets/c/50602?utm_source=warehouse&utm_medium=W5009&utm_campaign=fy26_p12_Showroom_ComputerDeskChair", enabled: true }
 ];
 
-// 全局狀態
+// 全局狀態（將統計數據統一放在 Server 端記錄）
 let globalState = {
   isRunning: false,
   currentLog: '',
   total: 0,
   current: 0,
   results: {},
+  stats: {}, // 格式: { [id]: { total: 0, success: 0, fail: 0 } }
   autoCheck: {
     enabled: false,
     intervalSeconds: 60,
@@ -66,19 +67,20 @@ let globalState = {
   }
 };
 
+// 初始化統計資料結構
+targetList.forEach(t => {
+  globalState.stats[t.id] = { total: 0, success: 0, fail: 0 };
+});
+
 let sseClients = [];
 let globalBrowser = null;
 
-/**
- * 取得/管理 單一 Browser 實例
- */
 async function getBrowserInstance() {
   if (globalBrowser && globalBrowser.isConnected()) {
     return globalBrowser;
   }
   
   let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  
   if (!executablePath) {
     const renderChromePath = '/opt/render/project/src/.cache/puppeteer';
     if (fs.existsSync(renderChromePath)) {
@@ -104,9 +106,6 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
-/**
- * 廣播狀態給所有連線中的前端 (SSE)
- */
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
   const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
@@ -119,6 +118,7 @@ function broadcastLog(logText) {
     current: globalState.current,
     total: globalState.total,
     results: globalState.results,
+    stats: globalState.stats, // 將確切統計數字推送給前端
     autoCheck: globalState.autoCheck
   };
 
@@ -135,7 +135,7 @@ function broadcastLog(logText) {
   });
 }
 
-// 自動檢測排程計時器 (修復點：每次精確過濾與終止判斷)
+// 自動檢測倒數定時器
 setInterval(() => {
   if (globalState.autoCheck.enabled && !globalState.isRunning) {
     globalState.autoCheck.remainingSeconds--;
@@ -143,7 +143,6 @@ setInterval(() => {
     if (globalState.autoCheck.remainingSeconds <= 0) {
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
-      // 動態即時取出有被勾選的 Target
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
       
       if (selectedTargets.length > 0) {
@@ -171,7 +170,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯
+ * Puppeteer 核心檢測邏輯 (GA4 強化判定)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -240,7 +239,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.scrollBy(0, -200);
     }).catch(() => {});
 
-    await new Promise(r => setTimeout(r, 3000));
+    // 提高等待時間至 4.5 秒，確保 GA4 延遲封包完畢
+    await new Promise(r => setTimeout(r, 4500));
 
     const pageAnalysis = await page.evaluate(() => {
       const title = document.title || '';
@@ -326,7 +326,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   }
 }
 
-// 背景測試執行器 (修復點：迴圈中動態檢查是否被使用者取消勾選)
+// 背景測試執行器 (嚴格進行內部計數與取消攔截)
 async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = true;
   globalState.total = selectedTargets.length;
@@ -335,9 +335,9 @@ async function runBackgroundTest(selectedTargets) {
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
 
   for (const [index, item] of selectedTargets.entries()) {
-    // 【修復關鍵】：判斷該項目在執行瞬間是否已被使用者取消勾選
+    // 若取消勾選，直接跳過不跑
     if (!globalState.autoCheck.selectedIds.includes(item.id)) {
-      console.log(`[Task ${item.id}] 使用者已取消勾選，跳過檢測。`);
+      console.log(`[Task ${item.id}] 未勾選，跳過檢測。`);
       continue;
     }
 
@@ -351,22 +351,31 @@ async function runBackgroundTest(selectedTargets) {
       result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無', debugDetails: '' };
     }
 
-    // 非同步跑完後二次檢查，防範檢測期間取消勾選
     if (globalState.autoCheck.selectedIds.includes(item.id)) {
       globalState.results[item.id] = result;
+
+      // 【核心修復】：計數統計直接在 Server 結算！
+      if (!globalState.stats[item.id]) {
+        globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
+      }
+      
+      const isPass = result.status === 200 && result.utmKept === '保留' && result.ga4Exist === '存在';
+      globalState.stats[item.id].total += 1;
+      if (isPass) {
+        globalState.stats[item.id].success += 1;
+      } else {
+        globalState.stats[item.id].fail += 1;
+      }
+
       const logInfo = result.debugDetails ? ` (${result.statusText} | ${result.debugDetails})` : ` (${result.statusText})`;
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成${logInfo}`);
-    } else {
-      console.log(`[Task ${item.id}] 檢測完成但項目已被取消勾選，捨棄結果。`);
     }
 
-    // 間隔 3 秒避免觸發頻率限制
     if (index < selectedTargets.length - 1) {
       await new Promise(r => setTimeout(r, 3000));
     }
   }
 
-  // 完成後重新歸零 Browser 釋放記憶體
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
@@ -381,21 +390,13 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// 【修復關鍵】：開啟/切換設定時完全同步狀態，防範廢棄的 Timer ID 殘留
 app.post('/api/config-auto-check', (req, res) => {
   const { enabled, intervalSeconds, selectedIds } = req.body;
   
   globalState.autoCheck.enabled = !!enabled;
-  
-  if (intervalSeconds) {
-    globalState.autoCheck.intervalSeconds = parseInt(intervalSeconds, 10);
-  }
-  
-  if (Array.isArray(selectedIds)) {
-    globalState.autoCheck.selectedIds = selectedIds;
-  }
+  if (intervalSeconds) globalState.autoCheck.intervalSeconds = parseInt(intervalSeconds, 10);
+  if (Array.isArray(selectedIds)) globalState.autoCheck.selectedIds = selectedIds;
 
-  // 切換時重置剩餘秒數
   globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
   
   broadcastLog(globalState.autoCheck.enabled ? `🔄 已更新自動輪詢設定 (每 ${globalState.autoCheck.intervalSeconds} 秒)` : `🛑 已關閉自動輪詢`);
@@ -428,7 +429,7 @@ app.get('/api/stream-logs', (req, res) => {
   });
 });
 
-// 前端 UI 介面
+// 前端 UI 介面（徹底簡化，將次數統計邏輯完全交給 Server，廢除前端的累加計算）
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -497,8 +498,6 @@ app.get('/', (req, res) => {
 
       <script>
         let targets = [];
-        let itemStats = {};
-        let processedResultIds = new Set();
         let evtSource = null;
 
         async function init() {
@@ -538,9 +537,6 @@ app.get('/', (req, res) => {
             const startBtn = document.getElementById('startBtn');
             const progressContainer = document.getElementById('progressContainer');
             if (data.isRunning) {
-              if (data.current === 1) {
-                processedResultIds.clear();
-              }
               startBtn.disabled = true;
               startBtn.classList.add('opacity-50');
               progressContainer.classList.remove('hidden');
@@ -574,8 +570,9 @@ app.get('/', (req, res) => {
               }
             }
 
+            // 更新結果卡片（統計數字與狀態直接由 Server 數據更新，絕不自己累加）
             if (data.results) {
-              Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id]));
+              Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id], data.stats ? data.stats[id] : null));
             }
           };
 
@@ -601,21 +598,16 @@ app.get('/', (req, res) => {
           });
         }
 
-        function updateCardUI(id, r) {
+        function updateCardUI(id, r, stat) {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          if (!processedResultIds.has(id)) {
-            processedResultIds.add(id);
-            if (!itemStats[id]) itemStats[id] = { total: 0, success: 0, fail: 0 };
-            const isPass = r.status === 200 && r.utmKept === '保留' && r.ga4Exist === '存在';
-            itemStats[id].total++;
-            if (isPass) itemStats[id].success++; else itemStats[id].fail++;
+          // 核心修復：直接渲染 Server 算好的統計，防止數字狂跳
+          if (stat) {
+            card.querySelector('.card-total-count').textContent = stat.total;
+            card.querySelector('.card-success-count').textContent = stat.success;
+            card.querySelector('.card-fail-count').textContent = stat.fail;
           }
-
-          card.querySelector('.card-total-count').textContent = itemStats[id].total;
-          card.querySelector('.card-success-count').textContent = itemStats[id].success;
-          card.querySelector('.card-fail-count').textContent = itemStats[id].fail;
 
           const statusEl = card.querySelector('.status-val');
           statusEl.textContent = r.status === 200 ? '✅ ' + r.statusText : '❌ ' + r.statusText;
@@ -683,7 +675,6 @@ app.get('/', (req, res) => {
           const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
           if (selected.length === 0) return alert('請至少勾選一個項目！');
 
-          processedResultIds.clear();
           try {
             const startRes = await fetch('/api/start-test', {
               method: 'POST',
