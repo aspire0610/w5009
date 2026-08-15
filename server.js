@@ -66,6 +66,33 @@ let globalState = {
 };
 
 let sseClients = [];
+let globalBrowser = null;
+
+/**
+ * 取得/管理 單一 Browser 實例（重用瀏覽器）
+ */
+async function getBrowserInstance() {
+  if (globalBrowser && globalBrowser.isConnected()) {
+    return globalBrowser;
+  }
+  
+  globalBrowser = await puppeteer.launch({
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1366,768'
+    ]
+  });
+
+  return globalBrowser;
+}
 
 /**
  * 廣播狀態給所有連線中的前端 (SSE)
@@ -132,32 +159,18 @@ setInterval(() => {
   });
 }, 10000);
 
-// Puppeteer 核心檢測邏輯（優化防拆機制與正確釋放記憶體）
+// Puppeteer 核心檢測邏輯
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
-  let browser = null;
   let page = null;
   let ga4Fired = false;
 
   try {
-    browser = await puppeteer.launch({
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--single-process',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1366,768'
-      ]
-    });
-
+    const browser = await getBrowserInstance();
     page = await browser.newPage();
     
+    // 設置 30 秒 Timeout 限制
+    page.setDefaultNavigationTimeout(30000);
+
     // 擬真 User-Agent 與 Header 設定
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
@@ -165,7 +178,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
       'sec-ch-ua': '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
       'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"'
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest': 'document',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'none',
+      'sec-fetch-user': '?1'
     });
 
     // 注入 Cookie 避開彈窗阻擋
@@ -183,13 +200,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
+    // 使用 domcontentloaded 避免被卡在長連線 / 影音資源加載
     const response = await page.goto(item.url, { 
-      waitUntil: 'networkidle2', 
-      timeout: 45000 
+      waitUntil: 'domcontentloaded', 
+      timeout: 30000 
     });
 
     const httpStatus = response ? response.status() : 0;
 
+    // 模擬滑動頁面觸發 GA4 事件
     await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
     await new Promise(r => setTimeout(r, 2000));
 
@@ -217,10 +236,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   } catch (error) {
     console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
 
+    if (page) await page.close().catch(() => {});
+
     // 重試 1 次機制
     if (retryCount < 1) {
-      if (page) await page.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
       await new Promise(r => setTimeout(r, 3000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -230,13 +249,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       name: item.name, 
       url: item.url, 
       status: 0, 
-      statusText: error.message.includes('Timeout') ? '連線逾時(45s)' : '被擋/連線失敗', 
+      statusText: error.message.includes('Timeout') ? '連線逾時(30s)' : '被擋/連線失敗', 
       utmKept: '無', 
       ga4Exist: '無' 
     };
   } finally {
     if (page) await page.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -262,9 +280,16 @@ async function runBackgroundTest(selectedTargets) {
     globalState.results[item.id] = result;
     broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
 
+    // 調大爬蟲間隔（3.5 秒），避免觸發站方的 IP 頻率限制 (Rate Limit)
     if (index < selectedTargets.length - 1) {
-      await new Promise(r => setTimeout(r, 2500));
+      await new Promise(r => setTimeout(r, 3500));
     }
+  }
+
+  // 完成後重置 Browser，清空資源
+  if (globalBrowser) {
+    await globalBrowser.close().catch(() => {});
+    globalBrowser = null;
   }
 
   globalState.isRunning = false;
@@ -316,7 +341,7 @@ app.get('/api/stream-logs', (req, res) => {
   });
 });
 
-// 首頁介面
+// 首頁介面 (前端修正了 SSE 連線洩漏問題)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -402,9 +427,10 @@ app.get('/', (req, res) => {
         }
 
         function initSSE() {
-          if (evtSource) {
-            evtSource.close();
+          if (evtSource && evtSource.readyState !== EventSource.CLOSED) {
+            return; // 避免重複創建 SSE 連線
           }
+
           evtSource = new EventSource('/api/stream-logs');
 
           evtSource.onopen = () => {
@@ -474,11 +500,9 @@ app.get('/', (req, res) => {
           };
         }
 
-        document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible') {
-            initSSE();
-            syncAutoCheckToServer();
-          }
+        // 當頁面關閉或切換分頁時正確關閉連線
+        window.addEventListener('beforeunload', () => {
+          if (evtSource) evtSource.close();
         });
 
         async function syncAutoCheckToServer() {
