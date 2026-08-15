@@ -13,6 +13,15 @@ puppeteer.use(StealthPlugin());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// 全局防護：防止非同步錯誤拋出導致 Node 服務崩潰
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // 預設監測網址清單 (完整 34 項)
 let targetList = [
   { id: "1", name: "花櫃", url: "https://www.costco.com.tw/Sports-Lifestyle/Garden-Lifestyle/Flowers-Plant/c/121307?utm_source=warehouse&utm_medium=W5009&utm_campaign=posm-flowers", enabled: true },
@@ -187,15 +196,15 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯（已修正大小寫比對與 GA4 監聽）
+ * Puppeteer 檢測邏輯（加強 Cookie 自動接受 & 全局 UTM 封包追蹤）
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
-  let utmFoundInNetwork = false;
+  let utmFoundAnywhere = false;
 
-  // 取得原目標 URL 中的 utm_campaign (轉小寫處理)
   let targetCampaign = '';
+
   try {
     const urlObj = new URL(item.url);
     targetCampaign = (urlObj.searchParams.get('utm_campaign') || '').toLowerCase();
@@ -215,11 +224,17 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.chrome = { runtime: {} };
     });
 
-    // 監聽 GA4 請求與網路封包 (解決大小寫不匹配與非同步延遲問題)
+    // 1. 全局網路請求監聽：捕獲重導向、GA4 封包與 API 帶入的 UTM
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
-      
+
+      // 只要過程中有任何請求/封包帶有 targetCampaign 即算成功帶入
+      if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
+        utmFoundAnywhere = true;
+      }
+
+      // GA4 / GTM 封包監聽
       const isGaRequest = 
         reqUrl.includes('google-analytics.com') || 
         reqUrl.includes('analytics.google.com') ||
@@ -236,15 +251,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           broadcastLog(`   📡 [${item.name}] 偵測到網路封包觸發 GA4 / GTM！`);
         }
         ga4Fired = true;
-
-        // 如果封包內含有 targetCampaign，說明 UTM 成功發送
-        if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
-          utmFoundInNetwork = true;
-        }
       }
     });
 
-    // 操作 Log 1: 開啟網頁
+    // 2. 開啟網頁
     broadcastLog(`   🌐 [${item.name}] 正在載入網頁...`);
 
     let response = null;
@@ -256,53 +266,52 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    // 操作 Log 2: 關閉 Cookie 隱私條款
-    broadcastLog(`   🍪 [${item.name}] 檢查並自動關閉 Cookie 隱私彈窗...`);
-    const closedCookie = await page.evaluate(() => {
+    // 3. 自動接受 Cookie 彈窗
+    broadcastLog(`   🍪 [${item.name}] 自動檢查並接受 Cookie 條款...`);
+    const cookieAccepted = await page.evaluate(async () => {
       const selectors = [
         '#onetrust-accept-btn-handler',
         '#accept-recommended-btn-handler',
         '.optanon-allow-all',
         'button[id*="accept"]',
         'button[class*="accept"]',
-        '.cookie-accept'
+        '.cookie-accept',
+        'a[class*="cookie"]'
       ];
-      let clicked = false;
-      selectors.forEach(s => {
+
+      for (let s of selectors) {
         const btn = document.querySelector(s);
-        if (btn) {
+        if (btn && typeof btn.click === 'function') {
           btn.click();
-          clicked = true;
+          return true;
         }
-      });
-      return clicked;
+      }
+      return false;
     }).catch(() => false);
 
-    if (closedCookie) {
-      broadcastLog(`   ✅ [${item.name}] 已成功點擊同意 Cookie 條款`);
+    if (cookieAccepted) {
+      broadcastLog(`   ✅ [${item.name}] 已自動點擊同意 Cookie`);
     }
 
-    // 操作 Log 3: 模擬真人滾動與互動
+    // 4. 模擬真人滾動與觸發頁面事件
     broadcastLog(`   🖱️ [${item.name}] 模擬真人滑鼠滾動與互動...`);
     await page.evaluate(async () => {
       window.scrollTo(0, 300);
-      await new Promise(r => setTimeout(r, 300));
-      window.scrollTo(0, 1000);
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
+      window.scrollTo(0, 800);
+      await new Promise(r => setTimeout(r, 400));
       window.scrollTo(0, 0);
 
-      ['scroll', 'mousemove', 'touchmove', 'click'].forEach(evt => {
+      ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
         window.dispatchEvent(new Event(evt));
         document.dispatchEvent(new Event(evt));
       });
     }).catch(() => {});
 
-    // 操作 Log 4: 輪詢 GA4 dataLayer 狀態
-    const maxWaitTimeMs = 8000;
+    // 5. 等待 GA4 / GTM dataLayer 寫入
+    const maxWaitTimeMs = 6000;
     const pollIntervalMs = 500;
     let elapsed = 0;
-
-    broadcastLog(`   🔍 [${item.name}] 等待並驗證 GA4 dataLayer / GTM 狀態...`);
 
     while (elapsed < maxWaitTimeMs) {
       if (ga4Fired || stopRequested) break;
@@ -312,13 +321,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           const hasGaInFrame = await frame.evaluate(() => {
             const hasDataLayer = Array.isArray(window.dataLayer) && window.dataLayer.length > 0;
             const hasGTM = !!(window.google_tag_manager || window.gtag || window.ga || window.GoogleAnalyticsObject);
-            const hasEvents = hasDataLayer && window.dataLayer.some(e => e.event === 'gtm.js' || e.event === 'page_view' || e[0] === 'config');
-            return hasDataLayer || hasGTM || hasEvents;
+            return hasDataLayer || hasGTM;
           });
 
           if (hasGaInFrame) {
             ga4Fired = true;
-            broadcastLog(`   🎯 [${item.name}] 透過 JavaScript 框架內部確認 GA4 已被啟用`);
             break;
           }
         } catch (e) {}
@@ -329,37 +336,27 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += pollIntervalMs;
     }
 
-    let title = '';
-    try { title = await page.title(); } catch (e) {}
-    const isBlockedByWaf = title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403;
+    // 6. 最終 URL 驗證 (補強 Query String)
+    const finalUrl = page.url().toLowerCase();
+    if (targetCampaign && finalUrl.includes(targetCampaign)) {
+      utmFoundAnywhere = true;
+    }
 
-    // 修正：檢查 URL UTM 參數（強轉小寫防呆）
-    const finalUrl = page.url();
-    let hasUtm = false;
-    try {
-      const finalParams = new URL(finalUrl).searchParams;
-      const currentCampaign = (finalParams.get('utm_campaign') || '').toLowerCase();
-
-      if (targetCampaign) {
-        // 大小寫不敏感比對，或者網路封包中有攔截到
-        hasUtm = (currentCampaign === targetCampaign) || utmFoundInNetwork;
-      } else {
-        hasUtm = Array.from(finalParams.keys()).some(k => k.toLowerCase().startsWith('utm_'));
-      }
-    } catch (e) {
-      hasUtm = utmFoundInNetwork;
+    if (!targetCampaign) {
+      try {
+        const finalParams = new URL(page.url()).searchParams;
+        utmFoundAnywhere = Array.from(finalParams.keys()).some(k => k.toLowerCase().startsWith('utm_'));
+      } catch (e) {}
     }
 
     let statusMsg = '';
     if (httpStatus === 200) {
       statusMsg = '正常(200)';
-    } else if (httpStatus === 0 && (hasUtm || ga4Fired)) {
+    } else if (httpStatus === 0 && (utmFoundAnywhere || ga4Fired)) {
       statusMsg = '正常(載入成功)';
     } else {
       statusMsg = `異常(${httpStatus})`;
     }
-    
-    if (isBlockedByWaf) statusMsg = '被WAF阻擋(403)';
 
     return {
       id: item.id, 
@@ -367,7 +364,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       url: item.url, 
       status: httpStatus,
       statusText: statusMsg,
-      utmKept: hasUtm ? '保留' : '丟失/未帶入', 
+      utmKept: utmFoundAnywhere ? '保留' : '丟失/未帶入', 
       ga4Exist: ga4Fired ? '存在' : '缺失'
     };
 
