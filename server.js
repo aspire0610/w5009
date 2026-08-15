@@ -109,7 +109,7 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
-// 修正：強制指定為台北時間 (Asia/Taipei)
+// 強制指定為台北時間 (Asia/Taipei)
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
   const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
@@ -187,11 +187,19 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯（新增詳細的操作與進度 Log）
+ * Puppeteer 檢測邏輯（已修正大小寫比對與 GA4 監聽）
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
+  let utmFoundInNetwork = false;
+
+  // 取得原目標 URL 中的 utm_campaign (轉小寫處理)
+  let targetCampaign = '';
+  try {
+    const urlObj = new URL(item.url);
+    targetCampaign = (urlObj.searchParams.get('utm_campaign') || '').toLowerCase();
+  } catch (e) {}
 
   try {
     const browser = await getBrowserInstance();
@@ -207,7 +215,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.chrome = { runtime: {} };
     });
 
-    // 監聽 GA4 請求
+    // 監聽 GA4 請求與網路封包 (解決大小寫不匹配與非同步延遲問題)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -228,6 +236,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           broadcastLog(`   📡 [${item.name}] 偵測到網路封包觸發 GA4 / GTM！`);
         }
         ga4Fired = true;
+
+        // 如果封包內含有 targetCampaign，說明 UTM 成功發送
+        if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
+          utmFoundInNetwork = true;
+        }
       }
     });
 
@@ -320,19 +333,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try { title = await page.title(); } catch (e) {}
     const isBlockedByWaf = title.includes('Access Denied') || title.includes('Attention Required') || httpStatus === 403;
 
+    // 修正：檢查 URL UTM 參數（強轉小寫防呆）
     const finalUrl = page.url();
     let hasUtm = false;
     try {
-      const originalParams = new URL(item.url).searchParams;
       const finalParams = new URL(finalUrl).searchParams;
-      const expectedCampaign = originalParams.get('utm_campaign');
-      if (expectedCampaign) {
-        hasUtm = finalParams.get('utm_campaign') === expectedCampaign;
+      const currentCampaign = (finalParams.get('utm_campaign') || '').toLowerCase();
+
+      if (targetCampaign) {
+        // 大小寫不敏感比對，或者網路封包中有攔截到
+        hasUtm = (currentCampaign === targetCampaign) || utmFoundInNetwork;
       } else {
-        hasUtm = Array.from(originalParams.keys()).some(k => k.startsWith('utm_') && finalParams.has(k));
+        hasUtm = Array.from(finalParams.keys()).some(k => k.toLowerCase().startsWith('utm_'));
       }
     } catch (e) {
-      hasUtm = false;
+      hasUtm = utmFoundInNetwork;
     }
 
     let statusMsg = '';
@@ -518,6 +533,7 @@ app.get('/api/stream-logs', (req, res) => {
     sseClients = sseClients.filter(c => c !== res);
   });
 });
+
 // 前端 UI 介面
 app.get('/', (req, res) => {
   res.send(`
