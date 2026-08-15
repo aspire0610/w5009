@@ -1,18 +1,16 @@
 {
-  "name": "costco-utm-monitor",
+  "name": "my-test-server",
   "version": "1.0.0",
-  "description": "Costco UTM & GA4 Monitoring Dashboard",
+  "description": "Single-file Node.js Express server for local testing",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "express": "^4.19.2",
-    "puppeteer": "^22.6.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "express": "^4.19.2"
   }
 }
