@@ -1,8 +1,8 @@
 const express = require('express');
-const path = require('path');
 const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const path = require('path');
 
 // 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
 const puppeteer = require('puppeteer-extra');
@@ -109,12 +109,18 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
+// 修正：強制指定為台北時間 (Asia/Taipei)
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
   const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
   
+  const taipeiTime = new Date().toLocaleTimeString('zh-TW', { 
+    hour12: false, 
+    timeZone: 'Asia/Taipei' 
+  });
+
   const payload = {
-    time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+    time: taipeiTime,
     log: globalState.currentLog,
     percent: percent,
     isRunning: globalState.isRunning,
@@ -181,7 +187,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 核心檢測邏輯
+ * Puppeteer 檢測邏輯（新增詳細的操作與進度 Log）
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -201,6 +207,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.chrome = { runtime: {} };
     });
 
+    // 監聽 GA4 請求
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -217,9 +224,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         reqUrl.includes('gtm=');
 
       if (isGaRequest) {
+        if (!ga4Fired) {
+          broadcastLog(`   📡 [${item.name}] 偵測到網路封包觸發 GA4 / GTM！`);
+        }
         ga4Fired = true;
       }
     });
+
+    // 操作 Log 1: 開啟網頁
+    broadcastLog(`   🌐 [${item.name}] 正在載入網頁...`);
 
     let response = null;
     try {
@@ -230,7 +243,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : 0;
 
-    await page.evaluate(() => {
+    // 操作 Log 2: 關閉 Cookie 隱私條款
+    broadcastLog(`   🍪 [${item.name}] 檢查並自動關閉 Cookie 隱私彈窗...`);
+    const closedCookie = await page.evaluate(() => {
       const selectors = [
         '#onetrust-accept-btn-handler',
         '#accept-recommended-btn-handler',
@@ -239,12 +254,23 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         'button[class*="accept"]',
         '.cookie-accept'
       ];
+      let clicked = false;
       selectors.forEach(s => {
         const btn = document.querySelector(s);
-        if (btn) btn.click();
+        if (btn) {
+          btn.click();
+          clicked = true;
+        }
       });
-    }).catch(() => {});
+      return clicked;
+    }).catch(() => false);
 
+    if (closedCookie) {
+      broadcastLog(`   ✅ [${item.name}] 已成功點擊同意 Cookie 條款`);
+    }
+
+    // 操作 Log 3: 模擬真人滾動與互動
+    broadcastLog(`   🖱️ [${item.name}] 模擬真人滑鼠滾動與互動...`);
     await page.evaluate(async () => {
       window.scrollTo(0, 300);
       await new Promise(r => setTimeout(r, 300));
@@ -258,9 +284,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     }).catch(() => {});
 
+    // 操作 Log 4: 輪詢 GA4 dataLayer 狀態
     const maxWaitTimeMs = 8000;
     const pollIntervalMs = 500;
     let elapsed = 0;
+
+    broadcastLog(`   🔍 [${item.name}] 等待並驗證 GA4 dataLayer / GTM 狀態...`);
 
     while (elapsed < maxWaitTimeMs) {
       if (ga4Fired || stopRequested) break;
@@ -276,6 +305,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
           if (hasGaInFrame) {
             ga4Fired = true;
+            broadcastLog(`   🎯 [${item.name}] 透過 JavaScript 框架內部確認 GA4 已被啟用`);
             break;
           }
         } catch (e) {}
@@ -329,9 +359,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   } catch (error) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
-    console.error(`[檢測失敗 Error] ${item.name}:`, error.message);
-
     if (retryCount < 1) {
+      broadcastLog(`   ⚠️ [${item.name}] 首次測試異常 (${error.message})，進行第二次重試...`);
       await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -357,7 +386,6 @@ async function runBackgroundTest(selectedTargets) {
   globalState.total = selectedTargets.length;
   globalState.current = 0;
 
-  // 每次開始新測試前，清空當前的單次測試結果 (保留次數 stats)
   globalState.results = {};
 
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
@@ -369,12 +397,11 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (!globalState.autoCheck.selectedIds.includes(item.id)) {
-      console.log(`[Task ${item.id}] 未勾選，跳過檢測。`);
       continue;
     }
 
     globalState.current = index + 1;
-    broadcastLog(`[${index + 1}/${selectedTargets.length}] 模擬開啟中: ${item.name}...`);
+    broadcastLog(`▶️ [${index + 1}/${selectedTargets.length}] 開始檢測: ${item.name}`);
     
     let result;
     try {
@@ -406,7 +433,7 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id].fail += 1;
       }
 
-      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText})`);
+      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText} | UTM:${result.utmKept} | GA4:${result.ga4Exist})`);
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
@@ -421,7 +448,8 @@ async function runBackgroundTest(selectedTargets) {
 
   globalState.isRunning = false;
   if (!stopRequested) {
-    broadcastLog(`✨ 檢測完成！(${new Date().toLocaleTimeString()})`);
+    const finishTime = new Date().toLocaleTimeString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
+    broadcastLog(`✨ 本輪檢測完成！(${finishTime})`);
   }
 }
 
@@ -490,7 +518,6 @@ app.get('/api/stream-logs', (req, res) => {
     sseClients = sseClients.filter(c => c !== res);
   });
 });
-
 // 前端 UI 介面
 app.get('/', (req, res) => {
   res.send(`
@@ -528,7 +555,7 @@ app.get('/', (req, res) => {
             <span>> Terminal Real-time Logs</span>
             <span id="sseStatus" class="text-emerald-500 font-bold">● 連線正常</span>
           </div>
-          <div id="terminalBox" class="h-24 overflow-y-auto space-y-1 text-slate-300">
+          <div id="terminalBox" class="h-32 overflow-y-auto space-y-1 text-slate-300">
             <div>> 等待發起測試...</div>
           </div>
         </div>
@@ -563,7 +590,6 @@ app.get('/', (req, res) => {
           <span id="selectedCount" class="text-xs text-sky-400 font-semibold">已勾選: 0</span>
         </div>
 
-        <!-- 卡片容器 -->
         <div id="cardsContainer" class="flex flex-col gap-3"></div>
       </div>
 
@@ -577,7 +603,7 @@ app.get('/', (req, res) => {
           targets = await res.json();
           renderCards();
           updateCount();
-          reorderCards(); // 排序卡片
+          reorderCards();
           initSSE();
 
           setTimeout(() => {
@@ -649,7 +675,6 @@ app.get('/', (req, res) => {
               }
             }
 
-            // 更新歷史累積次數
             if (data.stats) {
               Object.keys(data.stats).forEach(id => {
                 const card = document.getElementById('card-' + id);
@@ -662,7 +687,6 @@ app.get('/', (req, res) => {
               });
             }
 
-            // 更新最新測試結果
             if (data.results) {
               Object.keys(data.results).forEach(id => updateCardUI(id, data.results[id]));
             }
@@ -709,7 +733,6 @@ app.get('/', (req, res) => {
           gaEl.className = 'ga-val font-bold ' + (r.ga4Exist === '存在' ? 'text-emerald-400' : 'text-rose-400');
         }
 
-        // 清空 UI 上的當前測試結果 (保持次數)
         function resetUIResults() {
           document.querySelectorAll('.target-checkbox:checked').forEach(cb => {
             const card = document.getElementById('card-' + cb.value);
@@ -775,14 +798,12 @@ app.get('/', (req, res) => {
           }).join('');
         }
 
-        // 監聽勾選變更
         function onCheckboxChange() {
           updateCount();
           reorderCards();
           syncAutoCheckToServer();
         }
 
-        // 卡片置頂排序邏輯 (已勾選在上，未勾選在下，並保持原始 ID 順序)
         function reorderCards() {
           const container = document.getElementById('cardsContainer');
           const cards = Array.from(container.children);
@@ -823,7 +844,6 @@ app.get('/', (req, res) => {
             const selected = Array.from(document.querySelectorAll('.target-checkbox:checked')).map(cb => cb.value);
             if (selected.length === 0) return alert('請至少勾選一個項目！');
 
-            // 啟動測試時先重置 UI 顯示結果 (保留歷史次數)
             resetUIResults();
 
             try {
