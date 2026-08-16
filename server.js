@@ -197,7 +197,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯
+ * Puppeteer 檢測邏輯 (已修正 GA4 雙軌判斷)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
@@ -229,7 +229,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.chrome = { runtime: {} };
     });
 
-    // 1. 全局網路請求監聽 (精準捕捉 GA4 數據發射封包)
+    // 1. 全局網路請求監聽 (多重寬鬆比對 GA4 封包)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -238,14 +238,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         utmFoundAnywhere = true;
       }
 
-      // 修正：嚴格鎖定 GA4 /collect 事件傳送端點
-      const isGa4Collect = 
-        (reqUrl.includes('google-analytics.com/g/collect') || reqUrl.includes('analytics.google.com/g/collect') || reqUrl.includes('/collect')) &&
-        (reqUrl.includes('v=2') || postData.includes('v=2'));
+      // 寬鬆判定：包含 GA 網域、/collect 端點、v=2 或 tid=g-
+      const isGa4Request = 
+        reqUrl.includes('google-analytics.com') ||
+        reqUrl.includes('analytics.google.com') ||
+        reqUrl.includes('/collect') ||
+        reqUrl.includes('tid=g-') ||
+        postData.includes('tid=g-') ||
+        reqUrl.includes('v=2');
 
-      if (isGa4Collect) {
+      if (isGa4Request) {
         if (!ga4Fired) {
-          broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 Data Collection 實體封包！`);
+          broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 網路數據封包！`);
         }
         ga4Fired = true;
       }
@@ -305,21 +309,41 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     }).catch(() => {});
 
-    // 5. 等待 GA4 封包發射
-    const maxWaitTimeMs = 6000;
+    // 5. 等待 GA4 封包發射（雙軌驗證：網路封包 + dataLayer 狀態）
+    const maxWaitTimeMs = 8000;
     const pollIntervalMs = 500;
     let elapsed = 0;
 
     while (elapsed < maxWaitTimeMs) {
       if (ga4Fired || stopRequested) break;
+
+      // 備援機制：檢查前端 window.dataLayer / gtag 狀態
+      const isGa4InWindow = await page.evaluate(() => {
+        if (Array.isArray(window.dataLayer)) {
+          const hasGa4Event = window.dataLayer.some(item => {
+            if (!item) return false;
+            const str = JSON.stringify(item).toLowerCase();
+            return str.includes('g-') || str.includes('page_view') || str.includes('gtm.js') || str.includes('config');
+          });
+          if (hasGa4Event) return true;
+        }
+        if (typeof window.gtag === 'function' || typeof window.ga === 'function') return true;
+        return false;
+      }).catch(() => false);
+
+      if (isGa4InWindow) {
+        ga4Fired = true;
+        broadcastLog(`   📡 [${item.name}] 透過前端 dataLayer 偵測到 GA4 追蹤碼！`);
+        break;
+      }
+
       await new Promise(r => setTimeout(r, pollIntervalMs));
       elapsed += pollIntervalMs;
     }
 
-    // 修正：偵測到觸發後，增加 2 秒傳輸緩衝，確保非同步網路請求完整送達 GA4 伺服器
     if (ga4Fired) {
       broadcastLog(`   ⏳ [${item.name}] 正在等待 GA4 數據完成傳送...`);
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
     }
 
     // 6. 最終 URL 驗證
