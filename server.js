@@ -111,7 +111,7 @@ async function getBrowserInstance() {
       '--no-first-run',
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
-      '--window-size=1366,768',
+      '--window-size=1440,900',
       '--lang=zh-TW,zh'
     ]
   });
@@ -197,9 +197,10 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯 (已修正 GA4 雙軌判斷)
+ * Puppeteer 檢測邏輯 (已全面修復 GA4 機制與真人行為模擬)
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
+  let context = null;
   let page = null;
   let ga4Fired = false;
   let utmFoundAnywhere = false;
@@ -212,22 +213,22 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
   try {
     const browser = await getBrowserInstance();
-    page = await browser.newPage();
+    
+    // 💡 修正點 1：使用獨立的無痕 Context，確保每次檢測生成全新 Client ID (_ga) 與 Session
+    context = await browser.createIncognitoBrowserContext();
+    page = await context.newPage();
     
     page.setDefaultNavigationTimeout(35000);
 
-    // 模擬真實台灣瀏覽器 Header，防止被 GA4 Bot 過濾機制擋下
+    // 💡 修正點 2：設定現代化 User-Agent 與對應的 Sec-CH-UA HTTP Headers
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
     await page.setExtraHTTPHeaders({
-      'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+      'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      'sec-ch-ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"'
     });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1366, height: 768 });
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
-      window.chrome = { runtime: {} };
-    });
+    await page.setViewport({ width: 1440, height: 900 });
 
     // 1. 全局網路請求監聽 (多重寬鬆比對 GA4 封包)
     page.on('request', request => {
@@ -294,22 +295,39 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       broadcastLog(`   ✅ [${item.name}] 已自動點擊同意 Cookie`);
     }
 
-    // 4. 模擬真人滾動與觸發頁面事件
-    broadcastLog(`   🖱️ [${item.name}] 模擬真人滑鼠滾動與互動...`);
-    await page.evaluate(async () => {
-      window.scrollTo(0, 300);
-      await new Promise(r => setTimeout(r, 400));
-      window.scrollTo(0, 800);
-      await new Promise(r => setTimeout(r, 400));
-      window.scrollTo(0, 0);
+    // 💡 修正點 3：真實真人行為模擬（包含隨機軌跡滑鼠移動與連續平滑滾動）
+    broadcastLog(`   🖱️ [${item.name}] 模擬真人滑鼠軌跡與滾動互動...`);
+    
+    // 模擬真實滑鼠軌跡移動
+    await page.mouse.move(100, 100);
+    await page.mouse.move(300, 250, { steps: 10 });
+    await page.mouse.move(500, 400, { steps: 15 });
 
+    // 逐步平滑滾動
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 200;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+
+          if (totalHeight >= 800 || totalHeight >= scrollHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 300);
+      });
+
+      // 觸發多個真實 DOM 事件，確保 GA4 Engagement 定時器啟動
       ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
         window.dispatchEvent(new Event(evt));
         document.dispatchEvent(new Event(evt));
       });
     }).catch(() => {});
 
-    // 5. 等待 GA4 封包發射（雙軌驗證：網路封包 + dataLayer 狀態）
+    // 4. 等待 GA4 封包發射（雙軌驗證：網路封包 + dataLayer 狀態）
     const maxWaitTimeMs = 8000;
     const pollIntervalMs = 500;
     let elapsed = 0;
@@ -341,12 +359,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += pollIntervalMs;
     }
 
+    // 💡 修正點 4：延長頁面停留時間（至少 5 秒），確保 GA4 順利完成 Engagement 與 unload 封包發射
     if (ga4Fired) {
-      broadcastLog(`   ⏳ [${item.name}] 正在等待 GA4 數據完成傳送...`);
-      await new Promise(r => setTimeout(r, 1500));
+      broadcastLog(`   ⏳ [${item.name}] 模擬停留 5 秒，確保 GA4 參與度事件 (user_engagement) 成功紀錄...`);
+      await page.mouse.move(400, 300, { steps: 5 });
+      await new Promise(r => setTimeout(r, 5000));
     }
 
-    // 6. 最終 URL 驗證
+    // 5. 最終 URL 驗證
     const finalUrl = page.url().toLowerCase();
     if (targetCampaign && finalUrl.includes(targetCampaign)) {
       utmFoundAnywhere = true;
@@ -397,7 +417,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    if (page) await page.close().catch(() => {});
+    // 關閉獨立的 Context，自動釋放頁面與 Cookie 資源
+    if (context) await context.close().catch(() => {});
   }
 }
 
@@ -769,7 +790,7 @@ app.get('/', (req, res) => {
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
 
           const utmEl = card.querySelector('.utm-val');
-          utmEl.textContent = r.utmKept === '保留' ? '✅ 保送' : '❌ ' + r.utmKept;
+          utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
           utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
 
           const gaEl = card.querySelector('.ga-val');
