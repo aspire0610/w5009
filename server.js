@@ -13,7 +13,7 @@ const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow'); // 防止部分 CDP 偵測腳本崩潰
 puppeteer.use(stealth);
 
-// 隨機延遲工具函式 (預設 1~3 秒)
+// 隨機延遲工具函式
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.use(express.json());
@@ -301,9 +301,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             url: modifiedUrl !== reqUrl ? modifiedUrl : undefined,
             postData: (modifiedPostData !== postData && modifiedPostData) ? Buffer.from(modifiedPostData).toString('base64') : undefined
           });
-        } catch (err) {
-          // 若請求已被頁面取消，忽略錯誤
-        }
+        } catch (err) {}
       });
 
     } catch (cdpErr) {
@@ -346,9 +344,24 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
 
     // -------------------------------------------------------------
-    // 跳轉至目標頁面 (調整導航策略 + 隨機休眠)
+    // 【新增】初始首頁緩衝：先輕柔訪問官網首頁取得 Cookie
     // -------------------------------------------------------------
-    // 進入頁面前加入 1~3 秒隨機休眠
+    try {
+      broadcastLog(`   🌐 [${item.name}] 正在訪問首頁建立緩衝 Session...`);
+      await page.goto('https://www.costco.com.tw/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000
+      });
+      // 在首頁稍作停留並小幅度移動滑鼠，模擬真實用戶暖機
+      await simulateHumanMouse(page, 200, 200, 400, 300);
+      await delay(1000 + Math.floor(Math.random() * 1000));
+    } catch (homeErr) {
+      console.warn('首頁預熱載入警告 (可忽略):', homeErr.message);
+    }
+
+    // -------------------------------------------------------------
+    // 跳轉至目標頁面
+    // -------------------------------------------------------------
     await delay(Math.floor(Math.random() * 2000) + 1000);
 
     broadcastLog(`   🔗 [${item.name}] 跳轉至目標連結...`);
@@ -363,7 +376,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試基本連線...`);
     }
 
-    // 進入頁面後加入 1~3 秒隨機休眠
     await delay(Math.floor(Math.random() * 2000) + 1000);
 
     const httpStatus = response ? response.status() : 0;
@@ -506,7 +518,10 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const randomWait = 2000 + Math.floor(Math.random() * 2000);
+      // -------------------------------------------------------------
+      // 【修改】拉長項目之間的休息時間：改為 4000 ~ 7000ms (4~7 秒)
+      // -------------------------------------------------------------
+      const randomWait = 4000 + Math.floor(Math.random() * 3000);
       await delay(randomWait);
     }
   }
