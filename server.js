@@ -1,8 +1,8 @@
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
-const path = require('path');
 
 // 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
 const puppeteer = require('puppeteer-extra');
@@ -119,7 +119,6 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
-// 強制指定為台北時間 (Asia/Taipei)
 function broadcastLog(logText) {
   if (logText) globalState.currentLog = logText;
   const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
@@ -176,7 +175,7 @@ setInterval(() => {
         broadcastLog(`⏰ [自動輪詢第 ${globalState.autoCheck.currentRunCount}${maxText} 次] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
         runBackgroundTest(selectedTargets);
       } else {
-        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目（不計入輪詢次數）`);
+        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
       }
     }
     broadcastLog();
@@ -197,10 +196,9 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯 (已全面修復 GA4 機制與真人行為模擬)
+ * 全面修復版 Puppeteer 檢測邏輯
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
-  let context = null;
   let page = null;
   let ga4Fired = false;
   let utmFoundAnywhere = false;
@@ -213,14 +211,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
   try {
     const browser = await getBrowserInstance();
+    page = await browser.newPage();
     
-    // 💡 修正點 1：使用獨立的無痕 Context，確保每次檢測生成全新 Client ID (_ga) 與 Session
-    context = await browser.createIncognitoBrowserContext();
-    page = await context.newPage();
-    
-    page.setDefaultNavigationTimeout(35000);
+    // 💡 清除上一階段的 Cookie 與快取，確保 GA4 _ga 重置（達到獨立無痕的效果且不造成連線錯誤）
+    const client = await page.target().createCDPSession();
+    await client.send('Network.clearBrowserCookies');
+    await client.send('Network.clearBrowserCache');
 
-    // 💡 修正點 2：設定現代化 User-Agent 與對應的 Sec-CH-UA HTTP Headers
+    page.setDefaultNavigationTimeout(30000);
+
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -230,7 +229,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
     await page.setViewport({ width: 1440, height: 900 });
 
-    // 1. 全局網路請求監聽 (多重寬鬆比對 GA4 封包)
+    // 監聽 GA4 封包
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -239,7 +238,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         utmFoundAnywhere = true;
       }
 
-      // 寬鬆判定：包含 GA 網域、/collect 端點、v=2 或 tid=g-
       const isGa4Request = 
         reqUrl.includes('google-analytics.com') ||
         reqUrl.includes('analytics.google.com') ||
@@ -256,136 +254,48 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       }
     });
 
-    // 2. 開啟網頁
     broadcastLog(`   🌐 [${item.name}] 正在載入網頁...`);
-
     let response = null;
+    
     try {
-      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     } catch (e) {
-      response = await page.goto(item.url, { waitUntil: 'load', timeout: 15000 }).catch(() => null);
+      response = await page.goto(item.url, { waitUntil: 'load', timeout: 20000 }).catch(() => null);
     }
 
     const httpStatus = response ? response.status() : 0;
 
-    // 3. 自動接受 Cookie 彈窗
-    broadcastLog(`   🍪 [${item.name}] 自動檢查並接受 Cookie 條款...`);
-    const cookieAccepted = await page.evaluate(async () => {
-      const selectors = [
-        '#onetrust-accept-btn-handler',
-        '#accept-recommended-btn-handler',
-        '.optanon-allow-all',
-        'button[id*="accept"]',
-        'button[class*="accept"]',
-        '.cookie-accept',
-        'a[class*="cookie"]'
-      ];
-
-      for (let s of selectors) {
-        const btn = document.querySelector(s);
-        if (btn && typeof btn.click === 'function') {
-          btn.click();
-          return true;
-        }
-      }
-      return false;
-    }).catch(() => false);
-
-    if (cookieAccepted) {
-      broadcastLog(`   ✅ [${item.name}] 已自動點擊同意 Cookie`);
+    if (httpStatus === 0 && !response) {
+      throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 💡 修正點 3：真實真人行為模擬（包含隨機軌跡滑鼠移動與連續平滑滾動）
-    broadcastLog(`   🖱️ [${item.name}] 模擬真人滑鼠軌跡與滾動互動...`);
-    
-    // 模擬真實滑鼠軌跡移動
+    // 模擬真人操作
+    broadcastLog(`   🖱️ [${item.name}] 模擬真人互動中...`);
     await page.mouse.move(100, 100);
-    await page.mouse.move(300, 250, { steps: 10 });
-    await page.mouse.move(500, 400, { steps: 15 });
+    await page.mouse.move(300, 250, { steps: 5 });
 
-    // 逐步平滑滾動
     await page.evaluate(async () => {
-      await new Promise((resolve) => {
-        let totalHeight = 0;
-        const distance = 200;
-        const timer = setInterval(() => {
-          const scrollHeight = document.body.scrollHeight;
-          window.scrollBy(0, distance);
-          totalHeight += distance;
-
-          if (totalHeight >= 800 || totalHeight >= scrollHeight) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 300);
-      });
-
-      // 觸發多個真實 DOM 事件，確保 GA4 Engagement 定時器啟動
-      ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
+      window.scrollBy(0, 400);
+      ['scroll', 'mousemove', 'click'].forEach(evt => {
         window.dispatchEvent(new Event(evt));
-        document.dispatchEvent(new Event(evt));
       });
     }).catch(() => {});
 
-    // 4. 等待 GA4 封包發射（雙軌驗證：網路封包 + dataLayer 狀態）
-    const maxWaitTimeMs = 8000;
-    const pollIntervalMs = 500;
+    // 等待 GA4 發射
     let elapsed = 0;
-
-    while (elapsed < maxWaitTimeMs) {
+    while (elapsed < 6000) {
       if (ga4Fired || stopRequested) break;
-
-      // 備援機制：檢查前端 window.dataLayer / gtag 狀態
-      const isGa4InWindow = await page.evaluate(() => {
-        if (Array.isArray(window.dataLayer)) {
-          const hasGa4Event = window.dataLayer.some(item => {
-            if (!item) return false;
-            const str = JSON.stringify(item).toLowerCase();
-            return str.includes('g-') || str.includes('page_view') || str.includes('gtm.js') || str.includes('config');
-          });
-          if (hasGa4Event) return true;
-        }
-        if (typeof window.gtag === 'function' || typeof window.ga === 'function') return true;
-        return false;
-      }).catch(() => false);
-
-      if (isGa4InWindow) {
-        ga4Fired = true;
-        broadcastLog(`   📡 [${item.name}] 透過前端 dataLayer 偵測到 GA4 追蹤碼！`);
-        break;
-      }
-
-      await new Promise(r => setTimeout(r, pollIntervalMs));
-      elapsed += pollIntervalMs;
+      await new Promise(r => setTimeout(r, 500));
+      elapsed += 500;
     }
 
-    // 💡 修正點 4：延長頁面停留時間（至少 5 秒），確保 GA4 順利完成 Engagement 與 unload 封包發射
     if (ga4Fired) {
-      broadcastLog(`   ⏳ [${item.name}] 模擬停留 5 秒，確保 GA4 參與度事件 (user_engagement) 成功紀錄...`);
-      await page.mouse.move(400, 300, { steps: 5 });
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 3000));
     }
 
-    // 5. 最終 URL 驗證
     const finalUrl = page.url().toLowerCase();
     if (targetCampaign && finalUrl.includes(targetCampaign)) {
       utmFoundAnywhere = true;
-    }
-
-    if (!targetCampaign) {
-      try {
-        const finalParams = new URL(page.url()).searchParams;
-        utmFoundAnywhere = Array.from(finalParams.keys()).some(k => k.toLowerCase().startsWith('utm_'));
-      } catch (e) {}
-    }
-
-    let statusMsg = '';
-    if (httpStatus === 200) {
-      statusMsg = '正常(200)';
-    } else if (httpStatus === 0 && (utmFoundAnywhere || ga4Fired)) {
-      statusMsg = '正常(載入成功)';
-    } else {
-      statusMsg = `異常(${httpStatus})`;
     }
 
     return {
@@ -393,7 +303,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       name: item.name, 
       url: item.url, 
       status: httpStatus,
-      statusText: statusMsg,
+      statusText: httpStatus === 200 ? '正常(200)' : `HTTP ${httpStatus}`,
       utmKept: utmFoundAnywhere ? '保留' : '丟失/未帶入', 
       ga4Exist: ga4Fired ? '存在' : '缺失'
     };
@@ -402,7 +312,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 首次測試異常 (${error.message})，進行第二次重試...`);
+      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
+      if (page) await page.close().catch(() => {});
       await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -412,13 +323,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       name: item.name, 
       url: item.url, 
       status: 0, 
-      statusText: error.message.includes('Timeout') ? '連線逾時' : '連線失敗', 
+      statusText: '連線失敗', 
       utmKept: '無', 
       ga4Exist: '無'
     };
   } finally {
-    // 關閉獨立的 Context，自動釋放頁面與 Cookie 資源
-    if (context) await context.close().catch(() => {});
+    if (page) await page.close().catch(() => {});
   }
 }
 
@@ -454,7 +364,7 @@ async function runBackgroundTest(selectedTargets) {
         broadcastLog(`🛑 測試中斷，已跳過後續項目`);
         break;
       }
-      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '檢測過程異常', utmKept: '無', ga4Exist: '無' };
+      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '連線失敗', utmKept: '無', ga4Exist: '無' };
     }
 
     if (stopRequested) break;
@@ -466,7 +376,8 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
       }
       
-      const isStatusOk = (result.status === 200 || result.status === 0);
+      // 💡 修正判斷：只有 Status 200 才是正常成功
+      const isStatusOk = (result.status === 200);
       const isPass = isStatusOk && result.utmKept === '保留' && result.ga4Exist === '存在';
       
       globalState.stats[item.id].total += 1;
@@ -780,11 +691,12 @@ app.get('/', (req, res) => {
           }
         }
 
+        // 💡 修正 UI 顯示判定：只有 Status 200 才是正常成功
         function updateCardUI(id, r) {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          const isOkStatus = (r.status === 200 || r.status === 0);
+          const isOkStatus = (r.status === 200);
           const statusEl = card.querySelector('.status-val');
           statusEl.textContent = isOkStatus ? '✅ ' + r.statusText : '❌ ' + r.statusText;
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
