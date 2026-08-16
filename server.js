@@ -344,23 +344,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
 
     // -------------------------------------------------------------
-    // 【新增】初始首頁緩衝：先輕柔訪問官網首頁取得 Cookie
-    // -------------------------------------------------------------
-    try {
-      broadcastLog(`   🌐 [${item.name}] 正在訪問首頁建立緩衝 Session...`);
-      await page.goto('https://www.costco.com.tw/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000
-      });
-      // 在首頁稍作停留並小幅度移動滑鼠，模擬真實用戶暖機
-      await simulateHumanMouse(page, 200, 200, 400, 300);
-      await delay(1000 + Math.floor(Math.random() * 1000));
-    } catch (homeErr) {
-      console.warn('首頁預熱載入警告 (可忽略):', homeErr.message);
-    }
-
-    // -------------------------------------------------------------
-    // 跳轉至目標頁面
+    // 跳轉至目標頁面 (已取消初始首頁緩衝)
     // -------------------------------------------------------------
     await delay(Math.floor(Math.random() * 2000) + 1000);
 
@@ -518,9 +502,6 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      // -------------------------------------------------------------
-      // 【修改】拉長項目之間的休息時間：改為 4000 ~ 7000ms (4~7 秒)
-      // -------------------------------------------------------------
       const randomWait = 4000 + Math.floor(Math.random() * 3000);
       await delay(randomWait);
     }
