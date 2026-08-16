@@ -111,7 +111,8 @@ async function getBrowserInstance() {
       '--no-first-run',
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
-      '--window-size=1366,768'
+      '--window-size=1366,768',
+      '--lang=zh-TW,zh'
     ]
   });
 
@@ -164,7 +165,6 @@ setInterval(() => {
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
 
       if (selectedTargets.length > 0) {
-        // 只有在真的有勾選項目要執行時，才計算輪詢次數
         if (globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
           globalState.autoCheck.enabled = false;
           broadcastLog(`🏁 已達到設定的輪詢次數上限 (${globalState.autoCheck.maxRuns} 次)，自動輪詢已停止。`);
@@ -216,15 +216,20 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     page.setDefaultNavigationTimeout(35000);
 
+    // 模擬真實台灣瀏覽器 Header，防止被 GA4 Bot 過濾機制擋下
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+    });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1366, height: 768 });
 
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
       window.chrome = { runtime: {} };
     });
 
-    // 1. 全局網路請求監聽
+    // 1. 全局網路請求監聽 (精準捕捉 GA4 數據發射封包)
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -233,20 +238,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         utmFoundAnywhere = true;
       }
 
-      const isGaRequest = 
-        reqUrl.includes('google-analytics.com') || 
-        reqUrl.includes('analytics.google.com') ||
-        reqUrl.includes('googletagmanager.com') ||
-        reqUrl.includes('/collect') || 
-        reqUrl.includes('gtm.js') || 
-        reqUrl.includes('gtag/js') ||
-        reqUrl.includes('v=2') || postData.includes('v=2') ||
-        reqUrl.includes('tid=g-') || postData.includes('tid=g-') ||
-        reqUrl.includes('gtm=');
+      // 修正：嚴格鎖定 GA4 /collect 事件傳送端點
+      const isGa4Collect = 
+        (reqUrl.includes('google-analytics.com/g/collect') || reqUrl.includes('analytics.google.com/g/collect') || reqUrl.includes('/collect')) &&
+        (reqUrl.includes('v=2') || postData.includes('v=2'));
 
-      if (isGaRequest) {
+      if (isGa4Collect) {
         if (!ga4Fired) {
-          broadcastLog(`   📡 [${item.name}] 偵測到網路封包觸發 GA4 / GTM！`);
+          broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 Data Collection 實體封包！`);
         }
         ga4Fired = true;
       }
@@ -306,32 +305,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     }).catch(() => {});
 
-    // 5. 等待 GA4 / GTM dataLayer 寫入
+    // 5. 等待 GA4 封包發射
     const maxWaitTimeMs = 6000;
     const pollIntervalMs = 500;
     let elapsed = 0;
 
     while (elapsed < maxWaitTimeMs) {
       if (ga4Fired || stopRequested) break;
-
-      for (const frame of page.frames()) {
-        try {
-          const hasGaInFrame = await frame.evaluate(() => {
-            const hasDataLayer = Array.isArray(window.dataLayer) && window.dataLayer.length > 0;
-            const hasGTM = !!(window.google_tag_manager || window.gtag || window.ga || window.GoogleAnalyticsObject);
-            return hasDataLayer || hasGTM;
-          });
-
-          if (hasGaInFrame) {
-            ga4Fired = true;
-            break;
-          }
-        } catch (e) {}
-      }
-
-      if (ga4Fired) break;
       await new Promise(r => setTimeout(r, pollIntervalMs));
       elapsed += pollIntervalMs;
+    }
+
+    // 修正：偵測到觸發後，增加 2 秒傳輸緩衝，確保非同步網路請求完整送達 GA4 伺服器
+    if (ga4Fired) {
+      broadcastLog(`   ⏳ [${item.name}] 正在等待 GA4 數據完成傳送...`);
+      await new Promise(r => setTimeout(r, 2000));
     }
 
     // 6. 最終 URL 驗證
@@ -487,7 +475,6 @@ app.post('/api/config-auto-check', (req, res) => {
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
-// 重置測試統計數據 API
 app.post('/api/reset-stats', (req, res) => {
   targetList.forEach(t => {
     globalState.stats[t.id] = { total: 0, success: 0, fail: 0 };
@@ -758,7 +745,7 @@ app.get('/', (req, res) => {
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
 
           const utmEl = card.querySelector('.utm-val');
-          utmEl.textContent = r.utmKept === '保留' ? '✅ 保留' : '❌ ' + r.utmKept;
+          utmEl.textContent = r.utmKept === '保留' ? '✅ 保送' : '❌ ' + r.utmKept;
           utmEl.className = 'utm-val font-bold ' + (r.utmKept === '保留' ? 'text-emerald-400' : 'text-rose-400');
 
           const gaEl = card.querySelector('.ga-val');
