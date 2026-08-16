@@ -244,24 +244,35 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
 
-    // 監聽 GA4 封包
+    // 監聽 GA4 封包（優化版：支援 Server-Side GA4 及 POST Batch 封包解析）
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
 
+      // 檢查 UTM 參數
       if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
         utmFoundAnywhere = true;
       }
 
-      const isGa4Request =
+      // 1. 網址判定：涵蓋 Google Analytics 官方網址與常見 Server-Side /collect 路徑
+      const isGaUrl = 
         reqUrl.includes('google-analytics.com') ||
         reqUrl.includes('analytics.google.com') ||
         reqUrl.includes('/collect') ||
-        reqUrl.includes('tid=g-') ||
-        postData.includes('tid=g-') ||
-        reqUrl.includes('v=2');
+        reqUrl.includes('/g/collect') ||
+        reqUrl.includes('/gtm/collect');
 
-      if (isGa4Request) {
+      // 2. 參數判定：識別 GA4 標籤（tid=G-、v=2）或事件名稱
+      const isGaParam = 
+        reqUrl.includes('tid=g-') || 
+        postData.includes('tid=g-') ||
+        reqUrl.includes('v=2') ||
+        postData.includes('v=2') ||
+        postData.includes('en=page_view') ||
+        postData.includes('en=first_visit');
+
+      // 只要符合 GTM/GA4 端點或是包含 GA4 標籤參數，即判定為觸發
+      if (isGaUrl || isGaParam) {
         if (!ga4Fired) {
           broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 網路數據封包！`);
         }
