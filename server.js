@@ -198,7 +198,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * 終極修復版：針對高防禦電商 (Costco) 深度優化的 GA4 / GTM 與 CDP 網絡層檢測與 debug_mode 注入機制
+ * 優化版：加入流量預熱 (Pre-warming) 與真實 Referrer 偽裝
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
@@ -231,18 +231,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'sec-ch-ua-platform': '"Windows"',
       'Sec-Fetch-Dest': 'document',
       'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-Site': 'same-origin',
       'Sec-Fetch-User': '?1',
       'Upgrade-Insecure-Requests': '1'
     });
 
     await page.setViewport({ width: 1440, height: 900 });
 
-    // 🔥 升級 1：透過 CDP 的 Fetch API 進行底層攔截並強行注入 GA4 debug_mode (_dbg=1 / ep.debug_mode=true)
+    // 🔥 CDP 網路層攔截與 GA4 DebugView 注入
     try {
       cdpSession = await page.target().createCDPSession();
-      
-      // 啟動 CDP Fetch 網頁攔截機制
       await cdpSession.send('Fetch.enable', {
         patterns: [{ urlPattern: '*' }]
       });
@@ -252,12 +250,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         let reqUrl = request.url;
         let postData = request.postData || '';
 
-        // 檢查 UTM 參數
         if (targetCampaign && (reqUrl.toLowerCase().includes(targetCampaign) || postData.toLowerCase().includes(targetCampaign))) {
           utmFoundAnywhere = true;
         }
 
-        // 判斷是否為 GA4 collect 發送封包 (包含 Analytics 收集點)
         const isGA4Collect = 
           reqUrl.includes('/g/collect') || 
           reqUrl.includes('google-analytics.com/collect') ||
@@ -269,7 +265,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           }
           ga4Fired = true;
 
-          // 1. 動態修改 URL 參數，加入 _dbg=1 與 ep.debug_mode=true
           let urlObj = new URL(reqUrl);
           if (!urlObj.searchParams.has('_dbg')) {
             urlObj.searchParams.set('_dbg', '1');
@@ -279,7 +274,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           }
           let modifiedUrl = urlObj.toString();
 
-          // 2. 若有 POST payload，同步注入 &ep.debug_mode=true 與 &_dbg=1
           let modifiedPostData = postData;
           if (request.method === 'POST' && postData) {
             if (!postData.includes('_dbg=')) {
@@ -290,7 +284,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             }
           }
 
-          // 3. 繼續發送已被注入 Debug 參數的請求
           try {
             await cdpSession.send('Fetch.continueRequest', {
               requestId,
@@ -298,12 +291,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
               postData: modifiedPostData ? Buffer.from(modifiedPostData).toString('base64') : undefined
             });
             return;
-          } catch (err) {
-            // CDP 發送失敗時的 Fallback
-          }
+          } catch (err) {}
         }
 
-        // 針對其他非 GA4 核心封包，維持預設點對點繼續傳送
         try {
           await cdpSession.send('Fetch.continueRequest', { requestId });
         } catch (err) {}
@@ -313,7 +303,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       console.warn('CDP Session 初始化警告:', cdpErr.message);
     }
 
-    // 🔥 升級 2：相容性更高的 dataLayer 代理監聽 (避免靜態覆蓋報錯)
     await page.evaluateOnNewDocument(() => {
       try {
         Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -341,9 +330,31 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    broadcastLog(`   🌐 [${item.name}] 正在載入網頁...`);
-    let response = null;
+    // -------------------------------------------------------------
+    // 策略一：流量預熱（Pre-warming）
+    // -------------------------------------------------------------
+    const targetOrigin = new URL(item.url).origin;
+    broadcastLog(`   🔥 [${item.name}] 執行流量預熱：先進入首頁 ${targetOrigin}...`);
+    
+    try {
+      await page.goto(targetOrigin, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      // 模擬人類在首頁停留與微幅滑動
+      await page.mouse.move(200, 200);
+      await new Promise(r => setTimeout(r, 1000 + Math.floor(Math.random() * 1000)));
+    } catch (preWarmErr) {
+      console.warn(`[${item.name}] 預熱首頁載入逾時，繼續嘗試跳轉...`);
+    }
 
+    // -------------------------------------------------------------
+    // 策略二：注入真實 Referrer 偽裝並跳轉 Deep Link
+    // -------------------------------------------------------------
+    broadcastLog(`   🔗 [${item.name}] 帶入 Referrer (${targetOrigin}) 並跳轉目標深度連結...`);
+    
+    await page.setExtraHTTPHeaders({
+      'Referer': targetOrigin + '/'
+    });
+
+    let response = null;
     try {
       response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
     } catch (e) {
@@ -356,54 +367,33 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 🔥 升級 3：真實使用者互動 (Real Mouse Action + Wheel Scroll) 解鎖 Deferred GTM
+    // 真實使用者互動 (Real Mouse Action + Wheel Scroll) 解鎖 Deferred GTM
     broadcastLog(`   🖱️ [${item.name}] 執行真實互動與頁面滾動...`);
     
-    // 真實移動滑鼠
     await page.mouse.move(300, 300);
     await page.mouse.move(500, 400, { steps: 10 });
-    
-    // 真實物理滾動 (觸發依賴真實 Scroll 事件的 GA4 / GTM 腳本)
     await page.mouse.wheel({ deltaY: 600 });
     await new Promise(r => setTimeout(r, 1000));
     await page.mouse.wheel({ deltaY: -300 });
     await new Promise(r => setTimeout(r, 1000));
-
-    // 嘗試點擊頁面空白區域觸發 user-activation
     await page.mouse.click(100, 100).catch(() => {});
 
-    // 🔥 升級 4：多重 DOM 物件與 DOM 樹 Script 標籤驗證
+    // 多重 DOM 物件驗證
     let elapsed = 0;
     while (elapsed < 8000) {
       if (ga4Fired || stopRequested) break;
 
       const isGaActiveInDOM = await page.evaluate(() => {
-        // 檢查 1: 腳本注入旗標
         if (window.__ga4DetectedByScript) return true;
+        if (window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0) return true;
+        if (window.google_tag_manager && Object.keys(window.google_tag_manager).length > 0) return true;
+        if (typeof window.gtag === 'function') return true;
 
-        // 檢查 2: dataLayer 是否有事件推入
-        if (window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0) {
-          return true;
-        }
-
-        // 檢查 3: GTM 物件是否存在
-        if (window.google_tag_manager && Object.keys(window.google_tag_manager).length > 0) {
-          return true;
-        }
-
-        // 檢查 4: gtag 函式是否存在
-        if (typeof window.gtag === 'function') {
-          return true;
-        }
-
-        // 檢查 5: DOM 中是否有成功載入 GTM / GA4 的 script 標籤
         const scripts = Array.from(document.querySelectorAll('script[src]'));
-        const hasGtmScript = scripts.some(s => {
+        return scripts.some(s => {
           const src = s.src.toLowerCase();
           return src.includes('googletagmanager.com') || src.includes('google-analytics.com');
         });
-
-        return hasGtmScript;
       }).catch(() => false);
 
       if (isGaActiveInDOM) {
@@ -615,7 +605,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 真人行為模擬與 GA4 DebugView 強制注入版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 流量預熱與 Referrer 偽裝版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
             <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
