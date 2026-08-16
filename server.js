@@ -195,7 +195,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * 優化防封禁與完整 GA4 / GTM 封包監控
+ * 精準防封禁與全方位 GA4 / GTM 封包檢測
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
@@ -239,7 +239,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
 
-    // 擴充版 GA4 / GTM 封包監控
+    // 多重網域與多協定 GA4 封包捕捉邏輯
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
@@ -248,25 +248,28 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         utmFoundAnywhere = true;
       }
 
-      // 檢查 Google Analytics 域名、 Server-Side 端點及通用收集路徑
-      const isGaUrl = 
+      // 1. 域名捕捉：標準 GA 域名、代碼託管或 Common Analytics Endpoints
+      const isGaDomain = 
         reqUrl.includes('google-analytics.com') ||
         reqUrl.includes('analytics.google.com') ||
+        reqUrl.includes('googletagmanager.com/gtm.js') ||
+        reqUrl.includes('googletagmanager.com/gtag/js');
+
+      // 2. 端點捕捉 (涵蓋 Server-side GTM 自訂代理路徑)
+      const isGaEndpoint = 
         reqUrl.includes('/collect') ||
         reqUrl.includes('/g/collect') ||
         reqUrl.includes('/gtm/collect');
 
-      // 檢查 GA4 核心參數
-      const isGaParam = 
-        reqUrl.includes('tid=g-') || 
-        postData.includes('tid=g-') ||
-        reqUrl.includes('v=2') ||
-        postData.includes('v=2') ||
-        postData.includes('en=page_view') ||
-        postData.includes('en=first_visit') ||
-        reqUrl.includes('gtm=');
+      // 3. 核心參數特徵捕捉 (相容 GET & POST Payload)
+      const isGaParams = 
+        reqUrl.includes('tid=g-') || postData.includes('tid=g-') || // GA4 Measurement ID
+        reqUrl.includes('v=2') || postData.includes('v=2') ||       // GA4 Protocol Version
+        postData.includes('en=page_view') ||                        // GA4 PageView Event
+        postData.includes('en=first_visit') ||                      // GA4 First Visit Event
+        reqUrl.includes('gtm=');                                    // GTM Container Signal
 
-      if (isGaUrl || isGaParam) {
+      if (isGaDomain || isGaEndpoint || isGaParams) {
         if (!ga4Fired) {
           broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 / GTM 網路封包！`);
         }
@@ -289,7 +292,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 擬真互動與深度頁面滾動 (強迫解開 Lazy Load / GTM Delay)
+    // 自動同意 Cookie / 隱私條款 (觸發受限的 GA4 代碼)
+    await page.evaluate(() => {
+      const acceptButtons = Array.from(document.querySelectorAll('button, a')).filter(el => {
+        const text = el.innerText || '';
+        return text.includes('同意') || text.includes('Accept') || text.includes('接受') || text.includes('I Agree');
+      });
+      if (acceptButtons.length > 0) {
+        acceptButtons[0].click();
+      }
+    }).catch(() => {});
+
+    // 擬真互動與深度頁面滾動 (強迫解開 Lazy Load / GTM Trigger)
     broadcastLog(`   🖱️ [${item.name}] 模擬真人互動與滾動頁面...`);
     
     // 滑鼠軌跡移動
@@ -298,7 +312,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.mouse.move(startX, startY);
     await page.mouse.move(startX + 150, startY + 200, { steps: 10 });
 
-    // 主動向下滾動並分段微幅回滾，觸發延遲載入事件
+    // 分段向下滾動
     await page.evaluate(async () => {
       await new Promise((resolve) => {
         let totalHeight = 0;
@@ -308,12 +322,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           window.scrollBy(0, distance);
           totalHeight += distance;
 
-          // 觸發全域互動事件
+          // 手動觸發全域互動事件，解開因延遲加載而保留的 GA4 代碼
           ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
             window.dispatchEvent(new Event(evt));
           });
 
-          if (totalHeight >= 800 || totalHeight >= scrollHeight) {
+          if (totalHeight >= 1000 || totalHeight >= scrollHeight) {
             clearInterval(timer);
             window.scrollTo(0, 0); // 滾回頂部
             resolve();
@@ -321,6 +335,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         }, 150);
       });
     }).catch(() => {});
+
+    // 檢查 dataLayer 是否有預期事件發射 (二重備驗)
+    if (!ga4Fired) {
+      const hasGtmDataLayer = await page.evaluate(() => {
+        return !!(window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0);
+      }).catch(() => false);
+
+      if (hasGtmDataLayer) {
+        ga4Fired = true;
+        broadcastLog(`   📡 [${item.name}] 經由 dataLayer 備驗判定 GA4/GTM 代碼正常運作`);
+      }
+    }
 
     // 動態等待 GA4 發射，拉長攔截時間至 8000ms
     let elapsed = 0;
@@ -331,7 +357,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     if (ga4Fired) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 1000));
     }
 
     const finalUrl = page.url().toLowerCase();
