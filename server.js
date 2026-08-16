@@ -344,23 +344,27 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
 
     // -------------------------------------------------------------
-    // 跳轉至目標頁面 (已取消初始首頁緩衝)
+    // 【修改點 1】增加第一次請求前的緩衝時間（拉長至 2000ms ~ 4000ms）
+    // 讓 Stealth 隱身外掛有更充裕的時間完整注入變數與指紋
     // -------------------------------------------------------------
-    await delay(Math.floor(Math.random() * 2000) + 1000);
+    const preBufferTime = Math.floor(Math.random() * 2000) + 2000;
+    await delay(preBufferTime);
 
     broadcastLog(`   🔗 [${item.name}] 跳轉至目標連結...`);
     
     let response = null;
     try {
+      // 【修改點 2】放寬等待策略，避免第一次容易在 domcontentloaded 卡死
+      // 如果 retryCount > 0（代表已經失敗重試過），放寬至更寬鬆的 load 或縮短逾時
       response = await page.goto(item.url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
+        waitUntil: retryCount === 0 ? 'domcontentloaded' : 'load',
+        timeout: 35000
       });
     } catch (e) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試基本連線...`);
+      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`);
     }
 
-    await delay(Math.floor(Math.random() * 2000) + 1000);
+    await delay(Math.floor(Math.random() * 1500) + 1000);
 
     const httpStatus = response ? response.status() : 0;
 
@@ -421,11 +425,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
+      // 【修改點 3】拉長重試的間隔時間（從 2 秒增加至 3.5 秒），避免被當作連續攻擊阻擋
+      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，將於 3.5 秒後進行第 2 次重試...`);
       if (cdpSession) await cdpSession.detach().catch(() => {});
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await delay(2000);
+      await delay(3500);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
