@@ -213,7 +213,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   try {
     const browser = await getBrowserInstance();
     // 使用無痕上下文（Incognito Context），確保獨立 session 且不破壞底層 CDP 網路連線
-    context = await browser.createIncognitoBrowserContext();
+    context = await browser.createBrowserContext();
     page = await context.newPage();
 
     page.setDefaultNavigationTimeout(35000);
