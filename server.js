@@ -8,10 +8,13 @@ const PORT = process.env.PORT || 3000;
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
-// 啟用 Stealth 補丁
+// 啟用 Stealth 補丁，協助繞過 Akamai / Cloudflare 指紋檢測
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow'); // 防止部分 CDP 偵測腳本崩潰
 puppeteer.use(stealth);
+
+// 隨機延遲工具函式 (預設 1~3 秒)
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -245,13 +248,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    page.setDefaultNavigationTimeout(35000);
-
     await page.setBypassCSP(true);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
 
-    // 🔥 修復後的 CDP 攔截邏輯（徹底避免卡死）
+    // CDP 攔截邏輯
     try {
       cdpSession = await page.target().createCDPSession();
       await cdpSession.send('Fetch.enable', {
@@ -294,7 +295,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           } catch (e) {}
         }
 
-        // 確保每個請求都被 release 放行，不放留在 pending 狀態
         try {
           await cdpSession.send('Fetch.continueRequest', {
             requestId,
@@ -346,30 +346,25 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
 
     // -------------------------------------------------------------
-    // 預熱首頁
+    // 跳轉至目標頁面 (調整導航策略 + 隨機休眠)
     // -------------------------------------------------------------
-    const targetOrigin = new URL(item.url).origin;
-    broadcastLog(`   🔥 [${item.name}] 執行流量預熱：先進入首頁 ${targetOrigin}...`);
-    
-    try {
-      await page.goto(targetOrigin, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await simulateHumanMouse(page, 100, 100, 300, 200);
-      await new Promise(r => setTimeout(r, 500));
-    } catch (preWarmErr) {
-      broadcastLog(`   ⚠️ [${item.name}] 預熱逾時，直接進行跳轉...`);
-    }
+    // 進入頁面前加入 1~3 秒隨機休眠
+    await delay(Math.floor(Math.random() * 2000) + 1000);
 
-    // -------------------------------------------------------------
-    // 跳轉至目標頁面
-    // -------------------------------------------------------------
-    broadcastLog(`   🔗 [${item.name}] 跳轉至目標深度連結...`);
+    broadcastLog(`   🔗 [${item.name}] 跳轉至目標連結...`);
     
     let response = null;
     try {
-      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      response = await page.goto(item.url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000
+      });
     } catch (e) {
-      response = await page.goto(item.url, { waitUntil: 'load', timeout: 15000 }).catch(() => null);
+      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試基本連線...`);
     }
+
+    // 進入頁面後加入 1~3 秒隨機休眠
+    await delay(Math.floor(Math.random() * 2000) + 1000);
 
     const httpStatus = response ? response.status() : 0;
 
@@ -434,7 +429,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       if (cdpSession) await cdpSession.detach().catch(() => {});
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await new Promise(r => setTimeout(r, 1500));
+      await delay(2000);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -511,8 +506,8 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const delay = 1500 + Math.floor(Math.random() * 1000);
-      await new Promise(r => setTimeout(r, delay));
+      const randomWait = 2000 + Math.floor(Math.random() * 2000);
+      await delay(randomWait);
     }
   }
 
@@ -612,7 +607,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 流量預熱、硬體指紋與貝茲軌跡版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
             <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
@@ -956,5 +951,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
