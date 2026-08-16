@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
-// 啟用 Stealth 補丁，關閉容易被偵測的特徵
+// 啟用 Stealth 補丁
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow'); // 防止部分 CDP 偵測腳本崩潰
 puppeteer.use(stealth);
@@ -88,6 +88,7 @@ targetList.forEach(t => {
 let sseClients = [];
 let globalBrowser = null;
 
+// 🔥 記憶體優化：啟動參數極小化
 async function getBrowserInstance() {
   if (globalBrowser && globalBrowser.isConnected()) {
     return globalBrowser;
@@ -116,11 +117,48 @@ async function getBrowserInstance() {
       '--lang=zh-TW,zh',
       '--disable-web-security',
       '--disable-features=IsolateOrigins,site-per-process,EnableNetworkService',
-      '--allow-running-insecure-content'
+      '--allow-running-insecure-content',
+      // 極致省記憶體參數
+      '--js-flags="--max-old-space-size=512"',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-client-side-phishing-detection',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-sync'
     ]
   });
 
   return globalBrowser;
+}
+
+// -------------------------------------------------------------
+// 🖱️ 新增：三階貝茲曲線 (Cubic Bézier) 模擬真人滑鼠移動軌跡
+// -------------------------------------------------------------
+async function simulateHumanMouse(page, startX = 100, startY = 100, endX = 800, endY = 500) {
+  const steps = 12; // 減少 step 以節省 CPU & 時間
+  // 產生隨機控制點 Control Points
+  const controlX1 = startX + (endX - startX) * 0.25 + (Math.random() * 100 - 50);
+  const controlY1 = startY + (endY - startY) * 0.1 + (Math.random() * 100 - 50);
+  const controlX2 = startX + (endX - startX) * 0.75 + (Math.random() * 100 - 50);
+  const controlY2 = startY + (endY - startY) * 0.9 + (Math.random() * 100 - 50);
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    // Cubic Bézier formula
+    const x = Math.pow(1 - t, 3) * startX +
+              3 * Math.pow(1 - t, 2) * t * controlX1 +
+              3 * (1 - t) * Math.pow(t, 2) * controlX2 +
+              Math.pow(t, 3) * endX;
+              
+    const y = Math.pow(1 - t, 3) * startY +
+              3 * Math.pow(1 - t, 2) * t * controlY1 +
+              3 * (1 - t) * Math.pow(t, 2) * controlY2 +
+              Math.pow(t, 3) * endY;
+
+    await page.mouse.move(x, y);
+    await new Promise(r => setTimeout(r, 10 + Math.random() * 15));
+  }
 }
 
 function broadcastLog(logText) {
@@ -197,9 +235,6 @@ setInterval(() => {
   });
 }, 10000);
 
-/**
- * 優化版：加入流量預熱 (Pre-warming) 與真實 Referrer 偽裝
- */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
   let page = null;
@@ -215,10 +250,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
   try {
     const browser = await getBrowserInstance();
+    // 使用獨立 Incognito Context，便於事後完整釋放記憶體
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    page.setDefaultNavigationTimeout(40000);
+    page.setDefaultNavigationTimeout(35000);
 
     // 1. 繞過 CSP 與隱私限制
     await page.setBypassCSP(true);
@@ -303,13 +339,53 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       console.warn('CDP Session 初始化警告:', cdpErr.message);
     }
 
+    // -------------------------------------------------------------
+    // 🔥 深度注入硬體指紋 (WebGL, Canvas, Screen, Hardware)
+    // -------------------------------------------------------------
     await page.evaluateOnNewDocument(() => {
       try {
         Object.defineProperty(navigator, 'webdriver', { get: () => false });
       } catch (e) {}
 
-      window.__ga4DetectedByScript = false;
+      // 1. 偽裝 WebGL 顯卡資訊 (避免出現 SwiftShader 或 Headless 顯卡)
+      try {
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+          if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+          if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+          return getParameter.apply(this, arguments);
+        };
+      } catch (e) {}
 
+      // 2. 偽裝硬體核心數與記憶體
+      try {
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      } catch (e) {}
+
+      // 3. 補全 Chrome 外掛物件與 Screen 屬性
+      try {
+        Object.defineProperty(navigator, 'plugins', { 
+          get: () => [1, 2, 3, 4, 5] 
+        });
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+      } catch (e) {}
+
+      // 4. Canvas 指紋噪聲微調 (防 GA4 / Bot Detector 比對特徵)
+      try {
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+          const context = this.getContext('2d');
+          if (context) {
+            context.fillStyle = "rgba(255,255,255,0.01)";
+            context.fillRect(0, 0, 1, 1);
+          }
+          return originalToDataURL.apply(this, arguments);
+        };
+      } catch (e) {}
+
+      // 5. GA4 DataLayer 追蹤
+      window.__ga4DetectedByScript = false;
       let rawDataLayer = window.dataLayer || [];
       Object.defineProperty(window, 'dataLayer', {
         get() {
@@ -338,9 +414,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     try {
       await page.goto(targetOrigin, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      // 模擬人類在首頁停留與微幅滑動
-      await page.mouse.move(200, 200);
-      await new Promise(r => setTimeout(r, 1000 + Math.floor(Math.random() * 1000)));
+      // 使用貝茲曲線模擬滑鼠移動
+      await simulateHumanMouse(page, 100, 100, 300, 200);
+      await new Promise(r => setTimeout(r, 800));
     } catch (preWarmErr) {
       console.warn(`[${item.name}] 預熱首頁載入逾時，繼續嘗試跳轉...`);
     }
@@ -356,9 +432,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     let response = null;
     try {
-      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+      response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
-      response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 }).catch(() => null);
+      response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null);
     }
 
     const httpStatus = response ? response.status() : 0;
@@ -367,20 +443,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 真實使用者互動 (Real Mouse Action + Wheel Scroll) 解鎖 Deferred GTM
-    broadcastLog(`   🖱️ [${item.name}] 執行真實互動與頁面滾動...`);
+    // -------------------------------------------------------------
+    // 🖱️ 真實使用者互動 (Bezier Mouse Trajectory + Wheel Scroll)
+    // -------------------------------------------------------------
+    broadcastLog(`   🖱️ [${item.name}] 執行真人貝茲軌跡移動與頁面滾動...`);
     
-    await page.mouse.move(300, 300);
-    await page.mouse.move(500, 400, { steps: 10 });
-    await page.mouse.wheel({ deltaY: 600 });
-    await new Promise(r => setTimeout(r, 1000));
-    await page.mouse.wheel({ deltaY: -300 });
-    await new Promise(r => setTimeout(r, 1000));
+    await simulateHumanMouse(page, 150, 150, 600, 450);
+    await page.mouse.wheel({ deltaY: 500 });
+    await new Promise(r => setTimeout(r, 600));
+    await page.mouse.wheel({ deltaY: -200 });
+    await new Promise(r => setTimeout(r, 600));
     await page.mouse.click(100, 100).catch(() => {});
 
     // 多重 DOM 物件驗證
     let elapsed = 0;
-    while (elapsed < 8000) {
+    while (elapsed < 6000) {
       if (ga4Fired || stopRequested) break;
 
       const isGaActiveInDOM = await page.evaluate(() => {
@@ -406,10 +483,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += 500;
     }
 
-    if (ga4Fired) {
-      await new Promise(r => setTimeout(r, 1000));
-    }
-
     const finalUrl = page.url().toLowerCase();
     if (targetCampaign && finalUrl.includes(targetCampaign)) {
       utmFoundAnywhere = true;
@@ -431,8 +504,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
       if (cdpSession) await cdpSession.detach().catch(() => {});
+      if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 2000));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -446,7 +520,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
+    // 🔥 記憶體回收關鍵：關閉 page 與 context
     if (cdpSession) await cdpSession.detach().catch(() => {});
+    if (page) await page.close().catch(() => {});
     if (context) await context.close().catch(() => {});
   }
 }
@@ -508,9 +584,14 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const delay = 3000 + Math.floor(Math.random() * 2000);
+      const delay = 2000 + Math.floor(Math.random() * 1500);
       await new Promise(r => setTimeout(r, delay));
     }
+  }
+
+  // 強制啟動 GC 釋放 (若 Node 啟用 --expose-gc)
+  if (global.gc) {
+    try { global.gc(); } catch (e) {}
   }
 
   globalState.isRunning = false;
@@ -605,7 +686,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 流量預熱與 Referrer 偽裝版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 流量預熱、硬體指紋與貝茲軌跡版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
             <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
@@ -941,11 +1022,13 @@ app.get('/', (req, res) => {
           }
         }
 
-        init();
+        window.onload = init;
       </script>
     </body>
     </html>
   `);
 });
 
-app.listen(PORT, () => console.log(`🚀 監測伺服器運作中 PORT: ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
