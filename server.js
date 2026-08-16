@@ -161,21 +161,22 @@ setInterval(() => {
     if (globalState.autoCheck.remainingSeconds <= 0) {
       globalState.autoCheck.remainingSeconds = globalState.autoCheck.intervalSeconds;
       
-      if (globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
-        globalState.autoCheck.enabled = false;
-        broadcastLog(`🏁 已達到設定的輪詢次數上限 (${globalState.autoCheck.maxRuns} 次)，自動輪詢已停止。`);
-        return;
-      }
-
-      globalState.autoCheck.currentRunCount++;
       const selectedTargets = targetList.filter(t => globalState.autoCheck.selectedIds.includes(t.id));
-      
-      const maxText = globalState.autoCheck.maxRuns > 0 ? `/${globalState.autoCheck.maxRuns}` : '';
+
       if (selectedTargets.length > 0) {
+        // 只有在真的有勾選項目要執行時，才計算輪詢次數
+        if (globalState.autoCheck.maxRuns > 0 && globalState.autoCheck.currentRunCount >= globalState.autoCheck.maxRuns) {
+          globalState.autoCheck.enabled = false;
+          broadcastLog(`🏁 已達到設定的輪詢次數上限 (${globalState.autoCheck.maxRuns} 次)，自動輪詢已停止。`);
+          return;
+        }
+
+        globalState.autoCheck.currentRunCount++;
+        const maxText = globalState.autoCheck.maxRuns > 0 ? `/${globalState.autoCheck.maxRuns}` : '';
         broadcastLog(`⏰ [自動輪詢第 ${globalState.autoCheck.currentRunCount}${maxText} 次] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
         runBackgroundTest(selectedTargets);
       } else {
-        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
+        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目（不計入輪詢次數）`);
       }
     }
     broadcastLog();
@@ -196,13 +197,12 @@ setInterval(() => {
 }, 10000);
 
 /**
- * Puppeteer 檢測邏輯（加強 Cookie 自動接受 & 全局 UTM 封包追蹤）
+ * Puppeteer 檢測邏輯
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let ga4Fired = false;
   let utmFoundAnywhere = false;
-
   let targetCampaign = '';
 
   try {
@@ -224,17 +224,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       window.chrome = { runtime: {} };
     });
 
-    // 1. 全局網路請求監聽：捕獲重導向、GA4 封包與 API 帶入的 UTM
+    // 1. 全局網路請求監聽
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
 
-      // 只要過程中有任何請求/封包帶有 targetCampaign 即算成功帶入
       if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
         utmFoundAnywhere = true;
       }
 
-      // GA4 / GTM 封包監聽
       const isGaRequest = 
         reqUrl.includes('google-analytics.com') || 
         reqUrl.includes('analytics.google.com') ||
@@ -336,7 +334,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += pollIntervalMs;
     }
 
-    // 6. 最終 URL 驗證 (補強 Query String)
+    // 6. 最終 URL 驗證
     const finalUrl = page.url().toLowerCase();
     if (targetCampaign && finalUrl.includes(targetCampaign)) {
       utmFoundAnywhere = true;
@@ -489,6 +487,16 @@ app.post('/api/config-auto-check', (req, res) => {
   res.json({ success: true, autoCheck: globalState.autoCheck });
 });
 
+// 重置測試統計數據 API
+app.post('/api/reset-stats', (req, res) => {
+  targetList.forEach(t => {
+    globalState.stats[t.id] = { total: 0, success: 0, fail: 0 };
+  });
+  globalState.autoCheck.currentRunCount = 0;
+  broadcastLog(`🧹 已重置所有項目的測試次數數據`);
+  res.json({ success: true, message: '數據已重置' });
+});
+
 app.post('/api/start-test', (req, res) => {
   if (globalState.isRunning) return res.status(400).json({ error: '測試正在進行中' });
   const ids = req.body.ids || [];
@@ -550,7 +558,10 @@ app.get('/', (req, res) => {
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 真人行為模擬與完整 GA4 偵測版</p>
           </div>
-          <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition">🚀 執行測試</button>
+          <div class="flex items-center gap-2 w-full sm:w-auto">
+            <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
+            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
+          </div>
         </div>
 
         <div id="progressContainer" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 space-y-1.5">
@@ -653,13 +664,13 @@ app.get('/', (req, res) => {
 
             if (data.isRunning) {
               actionBtn.innerText = '🛑 停止測試';
-              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 w-full sm:w-auto transition';
+              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
               progressContainer.classList.remove('hidden');
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
               document.getElementById('progressPercentText').innerText = \`\${data.percent}%\`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
-              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 w-full sm:w-auto transition';
+              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
               if (data.percent === 100 || data.percent === 0) {
                 setTimeout(() => progressContainer.classList.add('hidden'), 3000);
               }
@@ -726,6 +737,15 @@ app.get('/', (req, res) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled, intervalSeconds, maxRuns, selectedIds: selected })
           });
+        }
+
+        async function resetStats() {
+          if (!confirm('確定要清除所有測試次數統計數據嗎？')) return;
+          try {
+            await fetch('/api/reset-stats', { method: 'POST' });
+          } catch (err) {
+            alert('清除失敗，請重試');
+          }
         }
 
         function updateCardUI(id, r) {
