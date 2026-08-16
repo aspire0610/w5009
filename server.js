@@ -88,7 +88,6 @@ targetList.forEach(t => {
 let sseClients = [];
 let globalBrowser = null;
 
-// 全域共用 Browser 實例，節省 RAM 並減少被辨識為機器人的頻率
 async function getBrowserInstance() {
   if (globalBrowser && globalBrowser.isConnected()) {
     return globalBrowser;
@@ -196,7 +195,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * 優化防封禁與穩定度的檢測邏輯
+ * 優化防封禁與完整 GA4 / GTM 封包監控
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
@@ -212,13 +211,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
   try {
     const browser = await getBrowserInstance();
-    // 使用無痕上下文（Incognito Context），確保獨立 session 且不破壞底層 CDP 網路連線
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
     page.setDefaultNavigationTimeout(35000);
 
-    // 擬真系統參數與 HTTP Headers
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -232,29 +229,26 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       'Upgrade-Insecure-Requests': '1'
     });
 
-    // 隨機化視窗尺寸，防範固定比例指紋
     const width = 1366 + Math.floor(Math.random() * 100);
     const height = 768 + Math.floor(Math.random() * 100);
     await page.setViewport({ width, height });
 
-    // 前置注入：進一步清除 webdriver 特徵
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
 
-    // 監聽 GA4 封包（優化版：支援 Server-Side GA4 及 POST Batch 封包解析）
+    // 擴充版 GA4 / GTM 封包監控
     page.on('request', request => {
       const reqUrl = request.url().toLowerCase();
       const postData = (request.postData() || '').toLowerCase();
 
-      // 檢查 UTM 參數
       if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
         utmFoundAnywhere = true;
       }
 
-      // 1. 網址判定：涵蓋 Google Analytics 官方網址與常見 Server-Side /collect 路徑
+      // 檢查 Google Analytics 域名、 Server-Side 端點及通用收集路徑
       const isGaUrl = 
         reqUrl.includes('google-analytics.com') ||
         reqUrl.includes('analytics.google.com') ||
@@ -262,19 +256,19 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         reqUrl.includes('/g/collect') ||
         reqUrl.includes('/gtm/collect');
 
-      // 2. 參數判定：識別 GA4 標籤（tid=G-、v=2）或事件名稱
+      // 檢查 GA4 核心參數
       const isGaParam = 
         reqUrl.includes('tid=g-') || 
         postData.includes('tid=g-') ||
         reqUrl.includes('v=2') ||
         postData.includes('v=2') ||
         postData.includes('en=page_view') ||
-        postData.includes('en=first_visit');
+        postData.includes('en=first_visit') ||
+        reqUrl.includes('gtm=');
 
-      // 只要符合 GTM/GA4 端點或是包含 GA4 標籤參數，即判定為觸發
       if (isGaUrl || isGaParam) {
         if (!ga4Fired) {
-          broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 網路數據封包！`);
+          broadcastLog(`   📡 [${item.name}] 成功攔截到 GA4 / GTM 網路封包！`);
         }
         ga4Fired = true;
       }
@@ -286,7 +280,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try {
       response = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
-      // 備用方案
       response = await page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 }).catch(() => null);
     }
 
@@ -296,31 +289,49 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 模擬擬真互動（隨機軌跡與滾動）
-    broadcastLog(`   🖱️ [${item.name}] 模擬真人互動中...`);
+    // 擬真互動與深度頁面滾動 (強迫解開 Lazy Load / GTM Delay)
+    broadcastLog(`   🖱️ [${item.name}] 模擬真人互動與滾動頁面...`);
+    
+    // 滑鼠軌跡移動
     const startX = 100 + Math.floor(Math.random() * 200);
     const startY = 100 + Math.floor(Math.random() * 150);
     await page.mouse.move(startX, startY);
     await page.mouse.move(startX + 150, startY + 200, { steps: 10 });
 
+    // 主動向下滾動並分段微幅回滾，觸發延遲載入事件
     await page.evaluate(async () => {
-      const scrollAmount = 300 + Math.floor(Math.random() * 300);
-      window.scrollBy(0, scrollAmount);
-      ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
-        window.dispatchEvent(new Event(evt));
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 250;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+
+          // 觸發全域互動事件
+          ['scroll', 'mousemove', 'click', 'touchstart'].forEach(evt => {
+            window.dispatchEvent(new Event(evt));
+          });
+
+          if (totalHeight >= 800 || totalHeight >= scrollHeight) {
+            clearInterval(timer);
+            window.scrollTo(0, 0); // 滾回頂部
+            resolve();
+          }
+        }, 150);
       });
     }).catch(() => {});
 
-    // 等待 GA4 發射
+    // 動態等待 GA4 發射，拉長攔截時間至 8000ms
     let elapsed = 0;
-    while (elapsed < 6000) {
+    while (elapsed < 8000) {
       if (ga4Fired || stopRequested) break;
       await new Promise(r => setTimeout(r, 500));
       elapsed += 500;
     }
 
     if (ga4Fired) {
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
     }
 
     const finalUrl = page.url().toLowerCase();
@@ -344,7 +355,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
       if (context) await context.close().catch(() => {});
-      // 重試前加入隨機間隔，降低連線過度密集觸發 WAF 的機率
       await new Promise(r => setTimeout(r, 3000 + Math.floor(Math.random() * 2000)));
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -419,7 +429,6 @@ async function runBackgroundTest(selectedTargets) {
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText} | UTM:${result.utmKept} | GA4:${result.ga4Exist})`);
     }
 
-    // 項目間加入 3~5 秒隨機冷卻間隔，防範速率限制（Rate Limit）
     if (index < selectedTargets.length - 1 && !stopRequested) {
       const delay = 3000 + Math.floor(Math.random() * 2000);
       await new Promise(r => setTimeout(r, delay));
