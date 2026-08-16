@@ -198,7 +198,7 @@ setInterval(() => {
 }, 10000);
 
 /**
- * 終極修復版：針對高防禦電商 (Costco) 深度優化的 GA4 / GTM 與 CDP 網絡層檢測機制
+ * 終極修復版：針對高防禦電商 (Costco) 深度優化的 GA4 / GTM 與 CDP 網絡層檢測與 debug_mode 注入機制
  */
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
@@ -238,42 +238,77 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     await page.setViewport({ width: 1440, height: 900 });
 
-    // 🔥 升級 1：啟用 Chrome DevTools Protocol (CDP) 網絡底層監聽
+    // 🔥 升級 1：透過 CDP 的 Fetch API 進行底層攔截並強行注入 GA4 debug_mode (_dbg=1 / ep.debug_mode=true)
     try {
       cdpSession = await page.target().createCDPSession();
-      await cdpSession.send('Network.enable');
+      
+      // 啟動 CDP Fetch 網頁攔截機制
+      await cdpSession.send('Fetch.enable', {
+        patterns: [{ urlPattern: '*' }]
+      });
 
-      cdpSession.on('Network.requestWillBeSent', event => {
-        const reqUrl = (event.request.url || '').toLowerCase();
-        const postData = (event.request.postData || '').toLowerCase();
+      cdpSession.on('Fetch.requestPaused', async (event) => {
+        const { requestId, request } = event;
+        let reqUrl = request.url;
+        let postData = request.postData || '';
 
-        if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
+        // 檢查 UTM 參數
+        if (targetCampaign && (reqUrl.toLowerCase().includes(targetCampaign) || postData.toLowerCase().includes(targetCampaign))) {
           utmFoundAnywhere = true;
         }
 
-        const isGA4CDP = 
-          reqUrl.includes('google-analytics') ||
-          reqUrl.includes('analytics.google') ||
-          reqUrl.includes('googletagmanager') ||
-          reqUrl.includes('/gtm.js') ||
-          reqUrl.includes('/gtag/js') ||
-          reqUrl.includes('collect?') ||
-          reqUrl.includes('tid=g-') ||
-          postData.includes('tid=g-') ||
-          reqUrl.includes('v=2') ||
-          postData.includes('v=2') ||
-          postData.includes('page_view') ||
-          reqUrl.includes('gtm=') ||
-          reqUrl.includes('doubleclick.net') ||
-          reqUrl.includes('googleadservices.com');
+        // 判斷是否為 GA4 collect 發送封包 (包含 Analytics 收集點)
+        const isGA4Collect = 
+          reqUrl.includes('/g/collect') || 
+          reqUrl.includes('google-analytics.com/collect') ||
+          reqUrl.includes('analytics.google.com/g/collect');
 
-        if (isGA4CDP) {
+        if (isGA4Collect) {
           if (!ga4Fired) {
-            broadcastLog(`   📡 [${item.name}] [CDP 底層] 攔截到 GA4 / GTM 封包！`);
+            broadcastLog(`   📡 [${item.name}] [CDP 攔截] 捕獲 GA4 collect 封包，正在強制注入 debug_mode...`);
           }
           ga4Fired = true;
+
+          // 1. 動態修改 URL 參數，加入 _dbg=1 與 ep.debug_mode=true
+          let urlObj = new URL(reqUrl);
+          if (!urlObj.searchParams.has('_dbg')) {
+            urlObj.searchParams.set('_dbg', '1');
+          }
+          if (!urlObj.searchParams.has('ep.debug_mode')) {
+            urlObj.searchParams.set('ep.debug_mode', 'true');
+          }
+          let modifiedUrl = urlObj.toString();
+
+          // 2. 若有 POST payload，同步注入 &ep.debug_mode=true 與 &_dbg=1
+          let modifiedPostData = postData;
+          if (request.method === 'POST' && postData) {
+            if (!postData.includes('_dbg=')) {
+              modifiedPostData += '&_dbg=1';
+            }
+            if (!postData.includes('ep.debug_mode=')) {
+              modifiedPostData += '&ep.debug_mode=true';
+            }
+          }
+
+          // 3. 繼續發送已被注入 Debug 參數的請求
+          try {
+            await cdpSession.send('Fetch.continueRequest', {
+              requestId,
+              url: modifiedUrl,
+              postData: modifiedPostData ? Buffer.from(modifiedPostData).toString('base64') : undefined
+            });
+            return;
+          } catch (err) {
+            // CDP 發送失敗時的 Fallback
+          }
         }
+
+        // 針對其他非 GA4 核心封包，維持預設點對點繼續傳送
+        try {
+          await cdpSession.send('Fetch.continueRequest', { requestId });
+        } catch (err) {}
       });
+
     } catch (cdpErr) {
       console.warn('CDP Session 初始化警告:', cdpErr.message);
     }
@@ -304,39 +339,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         },
         configurable: true
       });
-    });
-
-    // 雙重網路監聽 (Puppeteer Native Request Event)
-    page.on('request', request => {
-      const reqUrl = request.url().toLowerCase();
-      const postData = (request.postData() || '').toLowerCase();
-
-      if (targetCampaign && (reqUrl.includes(targetCampaign) || postData.includes(targetCampaign))) {
-        utmFoundAnywhere = true;
-      }
-
-      const isGA4Request = 
-        reqUrl.includes('google-analytics') ||
-        reqUrl.includes('analytics.google') ||
-        reqUrl.includes('googletagmanager') ||
-        reqUrl.includes('/gtm.js') ||
-        reqUrl.includes('/gtag/js') ||
-        reqUrl.includes('collect?') ||
-        reqUrl.includes('tid=g-') ||
-        postData.includes('tid=g-') ||
-        reqUrl.includes('v=2') ||
-        postData.includes('v=2') ||
-        postData.includes('page_view') ||
-        reqUrl.includes('gtm=') ||
-        reqUrl.includes('doubleclick.net') ||
-        reqUrl.includes('googleadservices.com');
-
-      if (isGA4Request) {
-        if (!ga4Fired) {
-          broadcastLog(`   📡 [${item.name}] 攔截到 GA4 / GTM 觸發封包！`);
-        }
-        ga4Fired = true;
-      }
     });
 
     broadcastLog(`   🌐 [${item.name}] 正在載入網頁...`);
@@ -613,7 +615,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 真人行為模擬與完整 GA4 偵測版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 真人行為模擬與 GA4 DebugView 強制注入版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
             <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
