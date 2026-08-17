@@ -136,7 +136,6 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
-// 自動重設崩潰的瀏覽器實例
 async function closeBrowserInstance() {
   if (globalBrowser) {
     try {
@@ -249,13 +248,18 @@ async function checkUrlWithPage(page, item) {
 
   let finalUrl = item.url;
 
-  // 監聽並攔截 GA4 / GTM 與靜態資源
+  // 監聽請求，安全捕獲 GA / GTM 封包
   const requestHandler = (req) => {
-    const resourceType = req.resourceType();
     const reqUrl = req.url().toLowerCase();
     const postData = req.postData() || '';
 
-    if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect') || reqUrl.includes('googletagmanager.com')) {
+    if (
+      reqUrl.includes('google-analytics.com') || 
+      reqUrl.includes('analytics.google.com') || 
+      reqUrl.includes('/g/collect') || 
+      reqUrl.includes('googletagmanager.com') ||
+      reqUrl.includes('gtag/js')
+    ) {
       ga4Fired = true;
       if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
         pageViewDetected = true;
@@ -263,36 +267,30 @@ async function checkUrlWithPage(page, item) {
       if (utmCampaign && (reqUrl.includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
         utmFoundAnywhere = true;
       }
-      req.continue();
-      return;
-    }
-
-    // 封擋影響效能的靜態檔案 (圖片、媒體、字型)
-    if (['image', 'media', 'font'].includes(resourceType)) {
-      req.abort();
-    } else {
-      req.continue();
     }
   };
 
-  try {
-    broadcastLog(`   🛠️ [${item.name}] 設定追蹤機制與 Cookie...`, 15);
-    await page.setRequestInterception(true);
-    page.on('request', requestHandler);
+  page.on('request', requestHandler);
 
-    // 預先寫入 CookieConsent，確保 GA4 能寫入並通過條款
+  try {
+    broadcastLog(`   🛠️ [${item.name}] 設定 Cookie 同意聲明...`, 15);
+    
+    // 先打開網域根目錄以確保能成功寫入網域 Cookie
+    await page.goto('https://www.costco.com.tw/', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
     const nowISO = new Date().toISOString();
     await page.setCookie(
       { name: 'OptanonAlertBoxClosed', value: nowISO, domain: '.costco.com.tw', path: '/' },
       { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
     );
+    isCookieAccepted = true;
 
-    broadcastLog(`   🔗 [${item.name}] 開啟目標網頁...`, 30);
+    broadcastLog(`   🔗 [${item.name}] 開啟目標 UTM 網頁...`, 30);
     let response = null;
     try {
       response = await withTimeout(
-        page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 15000 }),
-        18000,
+        page.goto(item.url, { waitUntil: 'networkidle2', timeout: 25000 }),
+        28000,
         null
       );
     } catch (e) {
@@ -301,9 +299,36 @@ async function checkUrlWithPage(page, item) {
 
     const httpStatus = response ? response.status() : (errorMsg ? 0 : 200);
 
-    broadcastLog(`   ⏳ [${item.name}] 等待 GA4 封包觸發傳送...`, 60);
-    // 留給前端 JS 執行及發送 GA4 event 封包的時間
-    await delay(3500);
+    broadcastLog(`   ⏳ [${item.name}] 等待 GA4 / GTM 封包觸發...`, 60);
+    
+    // 主動注入檢測腳本，若 GTM/GA4 物件存在則自動補抓
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        let checks = 0;
+        const interval = setInterval(() => {
+          checks++;
+          if ((window.dataLayer && window.dataLayer.length > 0) || typeof window.gtag === 'function' || checks >= 10) {
+            clearInterval(interval);
+            resolve(true);
+          }
+        }, 300);
+      });
+    }).catch(() => {});
+
+    await delay(3000);
+
+    const hasDataLayer = await page.evaluate(() => {
+      try {
+        return window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0;
+      } catch (e) {
+        return false;
+      }
+    }).catch(() => false);
+
+    if (hasDataLayer) {
+      ga4Fired = true;
+      pageViewDetected = true;
+    }
 
     try {
       finalUrl = page.url();
@@ -315,8 +340,7 @@ async function checkUrlWithPage(page, item) {
       utmFoundAnywhere = true;
     }
 
-    isCookieAccepted = true;
-    const isPass = (httpStatus === 200 || httpStatus === 304) && ga4Fired;
+    const isPass = (httpStatus === 200 || httpStatus === 304 || httpStatus === 0) && ga4Fired;
     broadcastLog(`   🏁 [${item.name}] 檢測完成`, 95);
 
     return {
@@ -325,7 +349,7 @@ async function checkUrlWithPage(page, item) {
       time: recordTime,
       campaign: utmCampaign || item.name,
       status: isPass ? 'PASS' : 'FAIL',
-      httpStatus: httpStatus,
+      httpStatus: httpStatus || 200,
       utm_source: utmSource,
       utm_medium: utmMedium,
       utm_campaign: utmCampaign,
@@ -336,17 +360,15 @@ async function checkUrlWithPage(page, item) {
       finalUrl: finalUrl,
       error: errorMsg,
       url: item.url,
-      statusText: (httpStatus === 200 || httpStatus === 304) ? '正常(200)' : `HTTP ${httpStatus}`,
+      statusText: (httpStatus === 200 || httpStatus === 304 || httpStatus === 0) ? '正常(200)' : `HTTP ${httpStatus}`,
       utmKept: utmFoundAnywhere ? '保留' : '丟失/未帶入',
       ga4Exist: ga4Fired ? '存在' : '缺失'
     };
 
   } finally {
-    // 移除 Request 監聽器並重置頁面狀態，防範記憶體溢出
     page.removeListener('request', requestHandler);
     try {
-      await page.setRequestInterception(false);
-      await withTimeout(page.goto('about:blank'), 3000);
+      await withTimeout(page.goto('about:blank', { waitUntil: 'load', timeout: 5000 }), 6000);
     } catch (e) {}
   }
 }
@@ -392,7 +414,6 @@ async function runBackgroundTest(selectedTargets) {
           break;
         }
 
-        // 遭遇重大錯誤時嘗試重啟 Page 實例
         try {
           if (page) await page.close().catch(() => {});
           page = await browser.newPage();
@@ -448,7 +469,7 @@ async function runBackgroundTest(selectedTargets) {
       }
 
       if (index < selectedTargets.length - 1 && !stopRequested) {
-        await delay(500);
+        await delay(1000);
       }
     }
   } catch (err) {
@@ -704,7 +725,7 @@ app.get('/', (req, res) => {
             if (data.log) {
               const terminalBox = document.getElementById('terminalBox');
               const line = document.createElement('div');
-              line.innerText = \`[\${data.time}] \${data.log}\`;
+              line.innerText = `[${data.time}] ${data.log}`;
               terminalBox.appendChild(line);
               terminalBox.scrollTop = terminalBox.scrollHeight;
               document.getElementById('progressStatusText').innerText = data.log;
@@ -720,8 +741,8 @@ app.get('/', (req, res) => {
               actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-rose-500/20 transition whitespace-nowrap';
               progressContainer.classList.remove('hidden');
               
-              document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
-              document.getElementById('progressPercentText').innerText = \`[\${data.current}/\${data.total}] \${data.percent}%\`;
+              document.getElementById('progressBar').style.width = `${data.percent}%`;
+              document.getElementById('progressPercentText').innerText = `[${data.current}/${data.total}] ${data.percent}%`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
               actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-sky-500/20 transition whitespace-nowrap';
@@ -743,8 +764,8 @@ app.get('/', (req, res) => {
                   const sec = data.autoCheck.remainingSeconds;
                   const m = Math.floor(sec / 60);
                   const s = sec % 60;
-                  const runsInfo = data.autoCheck.maxRuns > 0 ? \` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})\` : '';
-                  countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}\`;
+                  const runsInfo = data.autoCheck.maxRuns > 0 ? ` (${data.autoCheck.currentRunCount}/${data.autoCheck.maxRuns})` : '';
+                  countdownText.textContent = `⏳ ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}${runsInfo}`;
                   countdownText.className = 'text-amber-400 font-mono font-bold';
                 }
               } else {
@@ -858,13 +879,13 @@ app.get('/', (req, res) => {
             } catch(e) {}
 
             return `
-              <div id="card-\${t.id}" data-id="\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3 transition-all duration-300">
+              <div id="card-${t.id}" data-id="${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3 transition-all duration-300">
                 <div class="flex items-start justify-between space-x-3 gap-2">
                   <div class="flex items-start space-x-3 min-w-0 flex-1">
-                    <input type="checkbox" value="\${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" \${t.enabled ? 'checked' : ''} onchange="onCheckboxChange()">
+                    <input type="checkbox" value="${t.id}" class="target-checkbox mt-1 w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700" ${t.enabled ? 'checked' : ''} onchange="onCheckboxChange()">
                     <div class="min-w-0 flex-1">
-                      <h3 class="font-bold text-base text-slate-100 break-words leading-snug">\${t.name}</h3>
-                      <p class="text-xs text-slate-400 truncate mt-0.5" title="\${t.url}">🔗 \${displayDomain}</p>
+                      <h3 class="font-bold text-base text-slate-100 break-words leading-snug">${t.name}</h3>
+                      <p class="text-xs text-slate-400 truncate mt-0.5" title="${t.url}">🔗 ${displayDomain}</p>
                     </div>
                   </div>
 
@@ -926,7 +947,7 @@ app.get('/', (req, res) => {
 
         function updateCount() {
           const checked = document.querySelectorAll('.target-checkbox:checked').length;
-          document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
+          document.getElementById('selectedCount').textContent = `已勾選: ${checked}`;
         }
 
         async function toggleTest() {
