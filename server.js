@@ -247,14 +247,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    // 🎯 全面攔截與過濾資源，監聽 GA4 封包
+    // 🎯 啟用請求攔截並精準捕捉 GA4 封包
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
       const reqUrl = req.url().toLowerCase();
       const postData = req.postData() || '';
 
-      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect')) {
+      // 放行並記錄 Google Analytics / GTM 請求
+      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect') || reqUrl.includes('googletagmanager.com')) {
         ga4Fired = true;
         if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
           pageViewDetected = true;
@@ -266,12 +267,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         return;
       }
 
-      if (reqUrl.includes('googletagmanager.com')) {
-        req.continue();
-        return;
-      }
-
-      if (['image', 'media', 'font'].includes(resourceType)) {
+      // 阻擋非必要資源以提升載入速度與穩定度
+      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
@@ -281,13 +278,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 🍪 1. 在 Request Header 直接注入已同意的 OneTrust Cookie 字串 (關鍵修復：防止彈窗繪製)
+    // 🍪 注入 Cookie 略過 OneTrust 彈窗
     const cookieHeaderVal = 'OptanonAlertBoxClosed=2026-01-01T00:00:00.000Z; OptanonConsent=isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1;';
-    await page.setExtraHTTPHeaders({
-      'cookie': cookieHeaderVal
-    });
+    await page.setExtraHTTPHeaders({ 'cookie': cookieHeaderVal });
 
-    // 🍪 2. 寫入 Context Cookie 備份
     const nowISO = new Date().toISOString();
     try {
       await context.setCookies([
@@ -300,32 +294,35 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     let response = null;
     try {
-      response = await page.goto(item.url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 15000 
-      });
+      response = await withTimeout(
+        page.goto(item.url, { waitUntil: 'networkidle2', timeout: 20000 }),
+        22000,
+        null
+      );
     } catch (e) {
       errorMsg = e.message;
     }
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 3. 檢查 Cookie 同意狀態 (關鍵修復：改用輕量非阻塞檢測，移除 DOM/Iframe 穿透)
     broadcastLog(`   🍪 [${item.name}] 檢測 Cookie 狀態...`, 45);
-
     const currentCookies = await context.cookies();
     const optanonSet = currentCookies.some(c => c.name.includes('OptanonConsent') || c.name.includes('OptanonAlertBoxClosed'));
 
-    // 只要有帶入 Header 或 Context Cookie 設定成功即判定為同意
     if (optanonSet || cookieHeaderVal.includes('OptanonConsent')) {
       isCookieAccepted = true;
       broadcastLog(`   ✅ [${item.name}] Cookie 同意條款已確認帶入`, 60);
     }
 
-    // ⏳ 緩衝 1.5 秒，確保 GA4 封包順利發送
-    await delay(1500);
+    // ⏳ 給予足夠時間確保 GA4 封包完整觸發並回傳
+    await delay(3000);
 
-    finalUrl = page.url();
+    try {
+      finalUrl = page.url();
+    } catch (e) {
+      finalUrl = item.url;
+    }
+
     if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
       utmFoundAnywhere = true;
     }
@@ -388,6 +385,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
+    // 💡 確保每次執行完畢後安全關閉分頁與 Context，防止記憶體洩漏與第二次卡死
     if (page) {
       try {
         page.removeAllListeners('request');
@@ -404,11 +402,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 }
 
 async function runBackgroundTest(selectedTargets) {
+  if (globalState.isRunning) return;
   globalState.isRunning = true;
   stopRequested = false;
   globalState.total = selectedTargets.length;
   globalState.current = 0;
-
   globalState.results = {};
 
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`, 0);
@@ -483,7 +481,7 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      await delay(500);
+      await delay(1000); // 增加項目間隔緩衝，避免請求過快導致瀏覽器崩潰
     }
   }
 
@@ -526,7 +524,6 @@ app.get('/api/export-csv', (req, res) => {
 
   ids.forEach(id => {
     const item = results[id];
-
     const row = [
       `"${item.time || ''}"`,
       `"${(item.campaign || '').replace(/"/g, '""')}"`,
@@ -542,7 +539,6 @@ app.get('/api/export-csv', (req, res) => {
       `"${(item.finalUrl || item.url || '').replace(/"/g, '""')}"`,
       `"${(item.error || '').replace(/"/g, '""')}"`
     ];
-
     csvContent += row.join(',') + '\n';
   });
 
@@ -602,7 +598,6 @@ app.post('/api/stop-test', async (req, res) => {
 
   stopRequested = true;
   broadcastLog(`🛑 使用者請求停止測試中...`);
-
   res.json({ success: true, message: '已發送中斷請求' });
 });
 
@@ -736,7 +731,7 @@ app.get('/', (req, res) => {
             if (data.log) {
               const terminalBox = document.getElementById('terminalBox');
               const line = document.createElement('div');
-              line.innerText = `[\${data.time}] \${data.log}`;
+              line.innerText = \`[\${data.time}] \${data.log}\`;
               terminalBox.appendChild(line);
               terminalBox.scrollTop = terminalBox.scrollHeight;
               document.getElementById('progressStatusText').innerText = data.log;
@@ -752,8 +747,8 @@ app.get('/', (req, res) => {
               actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-rose-500/20 transition whitespace-nowrap';
               progressContainer.classList.remove('hidden');
               
-              document.getElementById('progressBar').style.width = `\${data.percent}%`;
-              document.getElementById('progressPercentText').innerText = `[\${data.current}/\${data.total}] \${data.percent}%`;
+              document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
+              document.getElementById('progressPercentText').innerText = \`[\${data.current}/\${data.total}] \${data.percent}%\`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
               actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-sky-500/20 transition whitespace-nowrap';
@@ -775,8 +770,8 @@ app.get('/', (req, res) => {
                   const sec = data.autoCheck.remainingSeconds;
                   const m = Math.floor(sec / 60);
                   const s = sec % 60;
-                  const runsInfo = data.autoCheck.maxRuns > 0 ? ` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})` : '';
-                  countdownText.textContent = `⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}`;
+                  const runsInfo = data.autoCheck.maxRuns > 0 ? \` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})\` : '';
+                  countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}\`;
                   countdownText.className = 'text-amber-400 font-mono font-bold';
                 }
               } else {
@@ -958,7 +953,7 @@ app.get('/', (req, res) => {
 
         function updateCount() {
           const checked = document.querySelectorAll('.target-checkbox:checked').length;
-          document.getElementById('selectedCount').textContent = `已勾選: \${checked}`;
+          document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
         }
 
         async function toggleTest() {
