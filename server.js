@@ -114,9 +114,9 @@ async function getBrowserInstance() {
       '--no-first-run',
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
-      '--window-size=1280,720',
+      '--window-size=1280,800',
       '--lang=zh-TW,zh',
-      '--js-flags="--max-old-space-size=256"', // 限制單一進程記憶體上限
+      '--js-flags="--max-old-space-size=256"',
       '--disable-background-networking',
       '--disable-extensions',
       '--disable-component-update'
@@ -238,7 +238,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    // 禁用不必要的圖像與字體載入，防禦記憶體過載致使崩潰
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -250,7 +249,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     });
 
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1280, height: 720 });
+    await page.setViewport({ width: 1280, height: 800 });
 
     try {
       cdpSession = await page.target().createCDPSession();
@@ -296,66 +295,86 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 【關鍵修正】：改善 Cookie 同意與 Costco 專屬彈窗點擊邏輯
-    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理 Cookie 授權彈窗...`, 45);
+    // 🍪 【重構修正】：解決好市多底部 Cookie 同意欄位的點擊與偵測
+    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理好市多底部 Cookie 授權欄位...`, 45);
     try {
-      // 1. 強制等待並注入通用 + 好市多專屬 Cookie 同意按鈕點擊
-      const cookieClicked = await page.evaluate(async () => {
-        const selectors = [
-          '#onetrust-accept-btn-handler',
-          '#accept-cookie',
-          '.cookie-accept',
-          'button[id*="accept" i]',
-          'button[class*="accept" i]',
-          'button[id*="cookie" i]',
-          'a[class*="cookie" i]'
-        ];
+      // 步驟 1: 平滑向下滾動，確保好市多底部 Cookie 橫幅正確觸發與渲染
+      await page.evaluate(() => {
+        window.scrollBy(0, 400);
+      });
+      await delay(800);
 
-        for (const selector of selectors) {
-          const btn = document.querySelector(selector);
-          if (btn && btn.offsetHeight > 0) {
-            btn.click();
-            return true;
+      // 步驟 2: 精準搜尋好市多專用及常見的 Cookie 接受按鈕選擇器
+      const cookieSelectors = [
+        '#onetrust-accept-btn-handler',
+        '.onetrust-close-btn-handler',
+        '#accept-cookie',
+        'button.cookie-accept',
+        '.cookie-banner button',
+        'button[id*="accept" i]',
+        'button[class*="accept" i]',
+        'a[id*="accept" i]',
+        'a[class*="accept" i]'
+      ];
+
+      let clicked = false;
+
+      for (const selector of cookieSelectors) {
+        const btn = await page.$(selector);
+        if (btn) {
+          const isVisible = await page.evaluate(el => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
+          }, btn);
+
+          if (isVisible) {
+            await btn.click().catch(() => {});
+            clicked = true;
+            break;
           }
         }
+      }
 
-        // 文字比對備用方案
-        const elements = Array.from(document.querySelectorAll('button, a, div, span'));
-        const target = elements.find(el => {
-          const text = (el.innerText || '').trim();
-          return (text === '同意' || text === '接受' || text === 'Accept' || text === 'Accept All' || text.includes('接受所有')) && el.offsetHeight > 0;
-        });
+      // 步驟 3: 若無 selector 匹配，採用全文深度比對按鈕文字
+      if (!clicked) {
+        clicked = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+          const target = buttons.find(b => {
+            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+            return (txt === '同意' || txt === '接受' || txt === 'accept' || txt === 'accept all' || txt.includes('接受所有') || txt.includes('同意所有')) && b.offsetHeight > 0;
+          });
 
-        if (target) {
-          target.click();
-          return true;
-        }
+          if (target) {
+            target.click();
+            return true;
+          }
+          return false;
+        }).catch(() => false);
+      }
 
-        return false;
-      }).catch(() => false);
-
-      if (cookieClicked) {
+      if (clicked) {
         isCookieAccepted = true;
-        broadcastLog(`   ✅ [${item.name}] 成功自動點擊 Cookie 同意按鈕`, 55);
+        broadcastLog(`   ✅ [${item.name}] 成功點擊好市多底部 Cookie 同意按鈕`, 55);
       } else {
-        // 2. 如果頁面沒有跳出按鈕，檢查 Context 或 Document 中是否存在被自動賦予的 Consent Cookie
+        // 步驟 4: 檢查是否有已存在的 Cookie 授權紀錄（如 Consent Cookies）
         const allCookies = await context.cookies();
-        const hasConsentCookie = allCookies.some(c => 
-          c.name.toLowerCase().includes('optanon') || 
-          c.name.toLowerCase().includes('consent') ||
-          c.name.toLowerCase().includes('cookie')
-        );
+        const hasConsentCookie = allCookies.some(c => {
+          const name = c.name.toLowerCase();
+          return name.includes('optanon') || name.includes('consent') || name.includes('cookie') || name.includes('notice');
+        });
 
         if (hasConsentCookie) {
           isCookieAccepted = true;
-          broadcastLog(`   ✅ [${item.name}] 檢測到已具備 Cookie 授權狀態`, 55);
+          broadcastLog(`   ✅ [${item.name}] 檢測到已保存 Cookie 授權狀態`, 55);
         } else {
-          // 強制觸發寫入模擬 Cookie 授權標籤
-          isCookieAccepted = true; 
+          // 如果網站沒有顯示 Banner 且 Cookie 無警告，判定預設無阻擋
+          isCookieAccepted = true;
+          broadcastLog(`   ℹ️ [${item.name}] 未發現 Cookie 阻擋彈窗，預設通行`, 55);
         }
       }
     } catch (e) {
-      console.warn('Cookie 處理過程異常:', e.message);
+      console.warn('Cookie 處理異常:', e.message);
+      isCookieAccepted = false;
     }
 
     await delay(1000);
@@ -426,7 +445,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    // 徹底釋放 CDP 監聽器與記憶體資源，解決當機問題
     if (cdpSession) {
       try {
         cdpSession.removeAllListeners();
@@ -522,7 +540,6 @@ async function runBackgroundTest(selectedTargets) {
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
     }
 
-    // 當每輪檢測完畢，手動釋放資源
     if (global.gc) {
       try { global.gc(); } catch (e) {}
     }
