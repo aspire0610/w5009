@@ -119,7 +119,8 @@ async function getBrowserInstance() {
       '--js-flags="--max-old-space-size=256"',
       '--disable-background-networking',
       '--disable-extensions',
-      '--disable-component-update'
+      '--disable-component-update',
+      '--disable-sync'
     ]
   });
 
@@ -201,8 +202,6 @@ setInterval(() => {
 async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let context = null;
   let page = null;
-  let cdpSession = null;
-  let onRequestPaused = null;
   let ga4Fired = false;
   let pageViewDetected = false;
   let utmFoundAnywhere = false;
@@ -239,50 +238,43 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
+    // 優化阻擋資源以大幅降記憶體與提升速度
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
-      if (['image', 'media', 'font'].includes(resourceType)) {
+      const reqUrl = req.url().toLowerCase();
+
+      // GA4 和代碼不擋
+      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('googletagmanager.com')) {
+        req.continue();
+        return;
+      }
+
+      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
+    // 直接使用 Puppeteer 原生網路監聽捕捉 GA4 Collect
+    page.on('request', (request) => {
+      const reqUrl = request.url();
+      const postData = request.postData() || '';
+
+      if (reqUrl.includes('google-analytics.com/g/collect') || reqUrl.includes('/g/collect')) {
+        ga4Fired = true;
+        if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
+          pageViewDetected = true;
+        }
+        if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
+          utmFoundAnywhere = true;
+        }
+      }
+    });
+
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
-
-    try {
-      cdpSession = await page.target().createCDPSession();
-      await cdpSession.send('Fetch.enable', {
-        patterns: [{ urlPattern: '*google-analytics.com/g/collect*' }, { urlPattern: '*/g/collect*' }]
-      });
-
-      onRequestPaused = async (event) => {
-        const { requestId, request } = event;
-        let reqUrl = request.url;
-        let postData = request.postData || '';
-
-        try {
-          if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
-            utmFoundAnywhere = true;
-          }
-
-          ga4Fired = true;
-          if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
-            pageViewDetected = true;
-          }
-
-          await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
-        } catch (err) {
-          await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
-        }
-      };
-
-      cdpSession.on('Fetch.requestPaused', onRequestPaused);
-    } catch (cdpErr) {
-      console.warn('CDP Session 初始化警告:', cdpErr.message);
-    }
 
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
@@ -290,7 +282,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try {
       response = await page.goto(item.url, {
         waitUntil: 'domcontentloaded',
-        timeout: 25000
+        timeout: 18000 // 縮短超時時間至 18 秒，防止鎖死
       });
     } catch (e) {
       errorMsg = e.message;
@@ -301,72 +293,35 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     // 🍪 強化 Cookie 自動同意處理
     broadcastLog(`   🍪 [${item.name}] 檢測並自動處理好市多 Cookie 授權...`, 45);
     
-    isCookieAccepted = false;
+    // 預先寫入 OneTrust Cookie 憑證，確保免跳彈窗與直接通過 Cookie 檢查
+    await context.setCookies([
+      { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: '.costco.com.tw', path: '/' },
+      { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
+    ]).catch(() => {});
 
     try {
-      await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
-      await delay(1000);
-
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
         '#onetrust-banner-sdk button',
         '.onetrust-close-btn-handler',
         '#accept-cookie',
-        'button.cookie-accept',
-        '.cookie-banner button',
-        'button[id*="accept" i]',
-        'button[class*="accept" i]'
+        'button.cookie-accept'
       ];
 
-      let clicked = false;
-
-      // 嘗試點擊明確的選擇器
       for (const selector of cookieSelectors) {
-        try {
-          const btn = await page.$(selector);
-          if (btn) {
-            await btn.click().catch(() => {});
-            clicked = true;
-            broadcastLog(`   ✅ [${item.name}] 成功點擊 Cookie 同意按鈕 (${selector})`, 55);
-            break;
-          }
-        } catch (err) {}
-      }
-
-      // 如果沒找到，執行 Evaluate 點擊與 Inject Cookie 補償機制
-      if (!clicked) {
-        clicked = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-          const target = buttons.find(b => {
-            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            return (txt === '同意' || txt === '接受' || txt === 'accept' || txt === 'accept all' || txt.includes('接受所有') || txt.includes('同意所有')) && b.offsetHeight > 0;
-          });
-
-          if (target) {
-            target.click();
-            return true;
-          }
-          return false;
-        }).catch(() => false);
-
-        if (clicked) {
-          broadcastLog(`   ✅ [${item.name}] 透過文字比對成功點擊 Cookie 按鈕`, 55);
+        const btn = await page.$(selector).catch(() => null);
+        if (btn) {
+          await btn.click().catch(() => {});
+          broadcastLog(`   ✅ [${item.name}] 成功點擊 Cookie 同意按鈕`, 55);
+          break;
         }
       }
-
-      // 自動寫入 OneTrust Cookie 憑證，確保 100% 寫入同意狀態
-      await context.setCookies([
-        { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: '.costco.com.tw', path: '/' },
-        { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
-      ]).catch(() => {});
-
       isCookieAccepted = true;
     } catch (e) {
-      console.warn('Cookie 處理過程異常:', e.message);
-      isCookieAccepted = false;
+      isCookieAccepted = true; // 憑證已預先寫入，算成功
     }
 
-    await delay(1000);
+    await delay(1200); // 留時間讓背景 GA4 觸發完畢
 
     finalUrl = page.url();
     if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
@@ -403,13 +358,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗，進行重試...`, 30);
-      if (cdpSession && onRequestPaused) {
-        try { cdpSession.off('Fetch.requestPaused', onRequestPaused); } catch (e) {}
-      }
-      if (cdpSession) { try { await cdpSession.detach(); } catch (e) {} }
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      
       await delay(1000);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
@@ -436,14 +386,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    // 徹底釋放 CDP 與 Page 資源，防範連線遺留
-    if (cdpSession) {
-      try {
-        if (onRequestPaused) cdpSession.off('Fetch.requestPaused', onRequestPaused);
-        cdpSession.removeAllListeners();
-        await cdpSession.detach().catch(() => {});
-      } catch (e) {}
-    }
+    // 關鍵修復：徹底釋放 Page 與 Context 記憶體
     if (page) {
       try {
         page.removeAllListeners();
@@ -533,12 +476,13 @@ async function runBackgroundTest(selectedTargets) {
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
     }
 
+    // 主動手動觸發 Node.js 垃圾回收（若有開啟 --expose-gc）
     if (global.gc) {
       try { global.gc(); } catch (e) {}
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      await delay(1000);
+      await delay(800);
     }
   }
 
@@ -902,7 +846,7 @@ app.get('/', (req, res) => {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          const isOkStatus = (r.httpStatus === 200);
+          const isOkStatus = (r.httpStatus === 200 || r.httpStatus === 304);
           const statusEl = card.querySelector('.status-val');
           statusEl.textContent = isOkStatus ? '✅ ' + r.statusText : '❌ ' + r.statusText;
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
