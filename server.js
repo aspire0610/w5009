@@ -239,7 +239,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let ga4Fired = false;
   let pageViewDetected = false;
   let utmFoundAnywhere = false;
-  let cookieClicked = false;
+  let isCookieAccepted = false; // 改為明確的同 steady 狀態標記
   let errorMsg = '';
 
   const recordTime = new Date().toLocaleString('zh-TW', {
@@ -374,7 +374,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error(`網頁回應失敗 (${errorMsg})`);
     }
 
-    // Cookie 點擊與處理
+    // 🍪 【修正重點】：Cookie 點擊與二階段嚴格授權驗證
     broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
     try {
       const cookieSelectors = [
@@ -390,39 +390,63 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
       for (const selector of cookieSelectors) {
         try {
-          const btn = await page.waitForSelector(selector, { visible: true, timeout: 3000 });
+          const btn = await page.waitForSelector(selector, { visible: true, timeout: 2500 });
           if (btn) {
             await btn.click();
-            cookieClicked = true;
+            isCookieAccepted = true;
             broadcastLog(`   ✅ [${item.name}] 已成功點擊 Cookie 同意按鈕 (${selector})`, 50);
+            await delay(1000); // 留時間讓 JS 將 Cookie 寫入瀏覽器
             break;
           }
         } catch (e) {}
       }
 
-      if (!cookieClicked) {
-        cookieClicked = await page.evaluate(() => {
+      // 如果 Selector 沒匹配到，改用文字模糊尋找或檢查 Cookie 欄位
+      if (!isCookieAccepted) {
+        const evalResult = await page.evaluate(() => {
+          // 嘗試點擊文字包含「同意/接受」的按鈕
           const elements = Array.from(document.querySelectorAll('button, a, div, span'));
           const target = elements.find(el => {
             const text = (el.innerText || '').trim();
             return (text === '同意' || text === '接受' || text === 'Accept All' || text === 'Accept Cookies' || text.includes('接受所有')) && el.offsetHeight > 0;
           });
+
           if (target) {
             target.click();
-            return true;
+            return { clicked: true, hasCookie: true };
           }
-          if (document.cookie.includes('OptanonConsent') || document.cookie.includes('OneTrustWPConsent')) {
-            return true;
-          }
-          return false;
-        }).catch(() => false);
 
-        if (cookieClicked) {
+          // 如果沒看到按鈕，檢查瀏覽器紀錄中是否已有 OneTrust 或類似 Consent Cookie 存在
+          const cookies = document.cookie || '';
+          const hasConsentCookie = cookies.includes('OptanonConsent') || 
+                                   cookies.includes('OneTrustWPConsent') || 
+                                   cookies.includes('cookie_consent') ||
+                                   cookies.includes('cookieConsent');
+
+          return { clicked: false, hasCookie: hasConsentCookie };
+        }).catch(() => ({ clicked: false, hasCookie: false }));
+
+        if (evalResult.clicked || evalResult.hasCookie) {
+          isCookieAccepted = true;
           broadcastLog(`   ✅ [${item.name}] 已確認 Cookie 授權狀態為同意`, 50);
         }
       }
+
+      // 再次確認 context cookie (確保寫入完成)
+      if (!isCookieAccepted) {
+        const cookies = await context.cookies().catch(() => []);
+        const consentFound = cookies.some(c => 
+          c.name.toLowerCase().includes('consent') || 
+          c.name.toLowerCase().includes('optanon') ||
+          c.name.toLowerCase().includes('cookie')
+        );
+        if (consentFound) {
+          isCookieAccepted = true;
+        }
+      }
+
     } catch (e) {
-      console.warn('Cookie 點擊嘗試失敗:', e.message);
+      console.warn('Cookie 處理過程異常:', e.message);
     }
 
     broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
@@ -471,7 +495,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       utm_source: utmSource,
       utm_medium: utmMedium,
       utm_campaign: utmCampaign,
-      cookieAccepted: cookieClicked ? 'TRUE' : 'FALSE',
+      cookieAccepted: isCookieAccepted ? 'TRUE' : 'FALSE', // 正確綁定最終變數
       gtag: ga4Fired ? 'TRUE' : 'FALSE',
       ga4CollectDetected: ga4Fired ? 'TRUE' : 'FALSE',
       pageViewDetected: (pageViewDetected || ga4Fired) ? 'TRUE' : 'FALSE',
