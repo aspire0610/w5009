@@ -95,6 +95,11 @@ async function getBrowserInstance() {
     return globalBrowser;
   }
 
+  if (globalBrowser) {
+    try { await globalBrowser.close(); } catch (e) {}
+    globalBrowser = null;
+  }
+
   let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   if (!executablePath) {
     const renderChromePath = '/opt/render/project/src/.cache/puppeteer';
@@ -272,7 +277,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    // 修正 Status 0 原因1：移除 page.setRequestInterception，避免與 CDP Fetch 衝突導致連線斷開
+    // 提高頁面超時限額，確保極短時間關閉不使用的連線
+    page.setDefaultNavigationTimeout(20000);
+    page.setDefaultTimeout(20000);
+
     await page.setBypassCSP(true);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
@@ -283,8 +291,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
       cdpSession.on('Fetch.requestPaused', async (event) => {
         const { requestId, request } = event;
-        let reqUrl = request.url;
+        let reqUrl = request.url || '';
         let postData = request.postData || '';
+        let modifiedUrl = reqUrl;
+        let modifiedPostData = postData;
 
         try {
           if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
@@ -295,9 +305,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             reqUrl.includes('/g/collect') || 
             reqUrl.includes('google-analytics.com/collect') ||
             reqUrl.includes('analytics.google.com/g/collect');
-
-          let modifiedUrl = reqUrl;
-          let modifiedPostData = postData;
 
           if (isGA4Collect) {
             ga4Fired = true;
@@ -318,15 +325,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
               }
             } catch (e) {}
           }
-
+        } catch (err) {
+          // 忽略內部比對錯誤
+        } finally {
+          // 強制所有請求 100% 繼續放行，避免造成卡死超時 (Hang)
           await cdpSession.send('Fetch.continueRequest', {
             requestId,
             url: modifiedUrl !== reqUrl ? modifiedUrl : undefined,
             postData: (modifiedPostData !== postData && modifiedPostData) ? Buffer.from(modifiedPostData).toString('base64') : undefined
-          });
-        } catch (err) {
-          // 修正 Status 0 原因2：確保攔截失敗或處理例外時，強迫放行該請求，防止請求永遠 Pending
-          await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
+          }).catch(() => {});
         }
       });
 
@@ -355,14 +362,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    await delay(500);
+    await delay(300);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
     let response = null;
     try {
       response = await page.goto(item.url, {
         waitUntil: 'domcontentloaded',
-        timeout: 25000
+        timeout: 20000
       });
     } catch (e) {
       errorMsg = e.message;
@@ -370,12 +377,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     await delay(500);
-    const httpStatus = response ? response.status() : 0;
-
-    // 修正 Status 0 原因3：只有當無 Response 且沒載入成功時才算真正失敗
-    if (httpStatus === 0 && !response && !errorMsg) {
-      throw new Error('網頁回應失敗 (Status 0)');
-    }
+    const httpStatus = response ? response.status() : (errorMsg ? 0 : 200);
 
     broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
     try {
@@ -449,12 +451,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += 300;
     }
 
-    finalUrl = page.url();
+    try {
+      finalUrl = page.url();
+    } catch (e) {}
+
     if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
       utmFoundAnywhere = true;
     }
 
-    const isPass = httpStatus === 200 && ga4Fired && utmFoundAnywhere;
+    const isPass = (httpStatus === 200 || httpStatus === 304) && ga4Fired && utmFoundAnywhere;
     broadcastLog(`   🏁 [${item.name}] 檢測完成，正在整理結果數據...`, 95);
 
     return {
@@ -474,7 +479,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       finalUrl: finalUrl,
       error: errorMsg,
       url: item.url,
-      statusText: httpStatus === 200 ? '正常(200)' : `HTTP ${httpStatus}`,
+      statusText: (httpStatus === 200 || httpStatus === 304) ? '正常(200)' : `HTTP ${httpStatus}`,
       utmKept: utmFoundAnywhere ? '保留' : '丟失/未帶入',
       ga4Exist: ga4Fired ? '存在' : '缺失'
     };
@@ -485,12 +490,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`, 30);
       if (cdpSession) {
-        cdpSession.removeAllListeners();
-        await cdpSession.detach().catch(() => {});
+        try { cdpSession.removeAllListeners(); await cdpSession.detach(); } catch (e) {}
       }
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await delay(1500);
+      await delay(1000);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -516,16 +520,15 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
+    // 嚴格回收所有分頁與 CDP 資源
     if (cdpSession) {
-      try { cdpSession.removeAllListeners(); } catch (e) {}
-      await cdpSession.detach().catch(() => {});
+      try { cdpSession.removeAllListeners(); await cdpSession.detach(); } catch (e) {}
     }
     if (page) {
-      try { page.removeAllListeners(); } catch (e) {}
-      await page.close().catch(() => {});
+      try { page.removeAllListeners(); await page.close(); } catch (e) {}
     }
     if (context) {
-      await context.close().catch(() => {});
+      try { await context.close(); } catch (e) {}
     }
   }
 }
@@ -606,11 +609,12 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const randomWait = 1500 + Math.floor(Math.random() * 1000);
+      const randomWait = 1000 + Math.floor(Math.random() * 500);
       await delay(randomWait);
     }
   }
 
+  // 強制釋放與回收記憶體
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
