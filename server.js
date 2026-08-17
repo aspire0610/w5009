@@ -295,18 +295,20 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 【重構修正】：解決好市多底部 Cookie 同意欄位的點擊與偵測
-    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理好市多底部 Cookie 授權欄位...`, 45);
-    try {
-      // 步驟 1: 平滑向下滾動，確保好市多底部 Cookie 橫幅正確觸發與渲染
-      await page.evaluate(() => {
-        window.scrollBy(0, 400);
-      });
-      await delay(800);
+    // 🍪 【精準判斷修正】：必須真實點擊或有授權紀錄才給 TRUE
+    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理好市多 Cookie 授權...`, 45);
+    
+    isCookieAccepted = false; // 預設嚴格為 false
 
-      // 步驟 2: 精準搜尋好市多專用及常見的 Cookie 接受按鈕選擇器
+    try {
+      // 1. 平滑滾動頁面促使 OneTrust / Cookie 橫幅掛載
+      await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+      await delay(1200);
+
+      // 2. 選擇器清單
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
+        '#onetrust-banner-sdk button',
         '.onetrust-close-btn-handler',
         '#accept-cookie',
         'button.cookie-accept',
@@ -319,23 +321,25 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
       let clicked = false;
 
+      // 檢查選擇器並嘗試點擊
       for (const selector of cookieSelectors) {
         const btn = await page.$(selector);
         if (btn) {
           const isVisible = await page.evaluate(el => {
             const rect = el.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
-          }, btn);
+          }, btn).catch(() => false);
 
           if (isVisible) {
             await btn.click().catch(() => {});
             clicked = true;
+            broadcastLog(`   ✅ [${item.name}] 成功點擊 Cookie 同意按鈕 (${selector})`, 55);
             break;
           }
         }
       }
 
-      // 步驟 3: 若無 selector 匹配，採用全文深度比對按鈕文字
+      // 3. 全文比對補充點擊
       if (!clicked) {
         clicked = await page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
@@ -350,30 +354,33 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           }
           return false;
         }).catch(() => false);
+
+        if (clicked) {
+          broadcastLog(`   ✅ [${item.name}] 透過文字比對成功點擊 Cookie 按鈕`, 55);
+        }
       }
 
+      // 4. 判定寫入狀態
       if (clicked) {
         isCookieAccepted = true;
-        broadcastLog(`   ✅ [${item.name}] 成功點擊好市多底部 Cookie 同意按鈕`, 55);
       } else {
-        // 步驟 4: 檢查是否有已存在的 Cookie 授權紀錄（如 Consent Cookies）
+        // 沒找到按鈕，確認瀏覽器是否有預存的 Cookie Consent 憑證
         const allCookies = await context.cookies();
         const hasConsentCookie = allCookies.some(c => {
           const name = c.name.toLowerCase();
-          return name.includes('optanon') || name.includes('consent') || name.includes('cookie') || name.includes('notice');
+          return name.includes('optanon') || name.includes('consent');
         });
 
         if (hasConsentCookie) {
           isCookieAccepted = true;
-          broadcastLog(`   ✅ [${item.name}] 檢測到已保存 Cookie 授權狀態`, 55);
+          broadcastLog(`   ℹ️ [${item.name}] 檢測到已有 Cookie 授權紀錄`, 55);
         } else {
-          // 如果網站沒有顯示 Banner 且 Cookie 無警告，判定預設無阻擋
-          isCookieAccepted = true;
-          broadcastLog(`   ℹ️ [${item.name}] 未發現 Cookie 阻擋彈窗，預設通行`, 55);
+          isCookieAccepted = false;
+          broadcastLog(`   ⚠️ [${item.name}] 未發現可點擊之 Cookie 按鈕且無授權紀錄`, 55);
         }
       }
     } catch (e) {
-      console.warn('Cookie 處理異常:', e.message);
+      console.warn('Cookie 處理過程異常:', e.message);
       isCookieAccepted = false;
     }
 
