@@ -247,51 +247,49 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
+    // 統一處理網絡請求監聽與過濾（修復重複宣告導致卡死的問題）
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
       const reqUrl = req.url().toLowerCase();
+      const postData = req.postData() || '';
 
-      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('googletagmanager.com')) {
+      // 🎯 偵測 GA4 請求發送 (包含 Google Analytics & GTM)
+      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect')) {
+        ga4Fired = true;
+        if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
+          pageViewDetected = true;
+        }
+        if (utmCampaign && (reqUrl.includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
+          utmFoundAnywhere = true;
+        }
         req.continue();
         return;
       }
 
-      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
+      if (reqUrl.includes('googletagmanager.com')) {
+        req.continue();
+        return;
+      }
+
+      // 🎯 封鎖不需要的圖片/媒體/字型檔以加快載入 speed
+      if (['image', 'media', 'font'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
-    page.on('request', (request) => {
-      const reqUrl = request.url();
-      const postData = request.postData() || '';
-
-      if (reqUrl.includes('google-analytics.com/g/collect') || reqUrl.includes('/g/collect')) {
-        ga4Fired = true;
-        if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
-          pageViewDetected = true;
-        }
-        if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
-          utmFoundAnywhere = true;
-        }
-      }
-    });
-
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 🍪 預先寫入 Cookie 憑證（若寫入成功，預設設為同意狀態）
+    // 🍪 預置 Costco Cookie 標記（包含 OneTrust 預設同意）
     try {
       await context.setCookies([
         { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: '.costco.com.tw', path: '/' },
         { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
       ]);
-      isCookieAccepted = true; // 憑證注入成功即可視為已通過 Cookie 驗證
-    } catch (err) {
-      isCookieAccepted = false;
-    }
+    } catch (err) {}
 
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
@@ -299,7 +297,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try {
       response = await page.goto(item.url, {
         waitUntil: 'domcontentloaded',
-        timeout: 15000 
+        timeout: 20000 
       });
     } catch (e) {
       errorMsg = e.message;
@@ -307,13 +305,13 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 嘗試補捕獲畫面上的 Cookie 彈窗點擊
-    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理 Cookie...`, 45);
+    // 🍪 處理 Costco 網頁下方彈出的 OneTrust Cookie 橫幅
+    broadcastLog(`   🍪 [${item.name}] 檢測並處理 Cookie 同意條款...`, 45);
     
-    const clickCookieAction = async () => {
+    const handleCostcoCookieBanner = async () => {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
-        '#onetrust-banner-sdk button',
+        'button#onetrust-accept-btn-handler',
         '.onetrust-close-btn-handler',
         '#accept-cookie',
         'button.cookie-accept'
@@ -321,7 +319,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
       for (const selector of cookieSelectors) {
         try {
-          const btn = await page.$(selector);
+          const btn = await page.waitForSelector(selector, { visible: true, timeout: 2500 });
           if (btn) {
             await btn.click();
             return true;
@@ -331,13 +329,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       return false;
     };
 
-    const clicked = await withTimeout(clickCookieAction(), 3000, false);
-    if (clicked) {
+    const clicked = await withTimeout(handleCostcoCookieBanner(), 3500, false);
+    
+    const currentCookies = await context.cookies();
+    const optanonSet = currentCookies.some(c => c.name.includes('OptanonConsent') || c.name.includes('OptanonAlertBoxClosed'));
+
+    if (clicked || optanonSet) {
       isCookieAccepted = true;
-      broadcastLog(`   ✅ [${item.name}] 成功點擊 Cookie 同意按鈕`, 55);
+      if (clicked) broadcastLog(`   ✅ [${item.name}] 成功點擊頁面下方 Cookie 同意按鈕`, 60);
     }
 
-    await delay(1200);
+    // ⏳ 給予 2 秒緩衝時間，確保頁面寫入 GA4 事件並完成網絡封包發送
+    await delay(2000);
 
     finalUrl = page.url();
     if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
@@ -373,7 +376,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入失敗，進行重試...`, 30);
+      broadcastLog(`   ⚠️ [${item.name}] 載入異常，進行自動重試...`, 30);
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
       await delay(1000);
@@ -402,15 +405,17 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
+    // 嚴格釋放資源，防止 EventEmitter 洩漏與頁面鎖死
     if (page) {
       try {
-        page.removeAllListeners();
-        await withTimeout(page.close(), 1500);
+        page.removeAllListeners('request');
+        page.removeAllListeners('response');
+        await withTimeout(page.close(), 2000);
       } catch (e) {}
     }
     if (context) {
       try {
-        await withTimeout(context.close(), 1500);
+        await withTimeout(context.close(), 2000);
       } catch (e) {}
     }
   }
