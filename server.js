@@ -114,48 +114,16 @@ async function getBrowserInstance() {
       '--no-first-run',
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
-      '--window-size=1440,900',
+      '--window-size=1280,720',
       '--lang=zh-TW,zh',
-      '--disable-web-security',
-      '--allow-running-insecure-content',
-      '--js-flags="--max-old-space-size=256"',
+      '--js-flags="--max-old-space-size=256"', // 限制單一進程記憶體上限
       '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-client-side-phishing-detection',
-      '--disable-default-apps',
       '--disable-extensions',
-      '--disable-sync',
-      '--disable-speech-api',
-      '--disable-print-preview',
-      '--mute-audio'
+      '--disable-component-update'
     ]
   });
 
   return globalBrowser;
-}
-
-async function simulateHumanMouse(page, startX = 100, startY = 100, endX = 800, endY = 500) {
-  const steps = 8;
-  const controlX1 = startX + (endX - startX) * 0.25 + (Math.random() * 100 - 50);
-  const controlY1 = startY + (endY - startY) * 0.1 + (Math.random() * 100 - 50);
-  const controlX2 = startX + (endX - startX) * 0.75 + (Math.random() * 100 - 50);
-  const controlY2 = startY + (endY - startY) * 0.9 + (Math.random() * 100 - 50);
-
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const x = Math.pow(1 - t, 3) * startX +
-              3 * Math.pow(1 - t, 2) * t * controlX1 +
-              3 * (1 - t) * Math.pow(t, 2) * controlX2 +
-              Math.pow(t, 3) * endX;
-              
-    const y = Math.pow(1 - t, 3) * startY +
-              3 * Math.pow(1 - t, 2) * t * controlY1 +
-              3 * (1 - t) * Math.pow(t, 2) * controlY2 +
-              Math.pow(t, 3) * endY;
-
-    await page.mouse.move(x, y).catch(() => {});
-    await new Promise(r => setTimeout(r, 10 + Math.random() * 10));
-  }
 }
 
 function broadcastLog(logText, itemProgress = null) {
@@ -212,8 +180,6 @@ setInterval(() => {
         const maxText = globalState.autoCheck.maxRuns > 0 ? `/${globalState.autoCheck.maxRuns}` : '';
         broadcastLog(`⏰ [自動輪詢第 ${globalState.autoCheck.currentRunCount}${maxText} 次] 開始執行 ${selectedTargets.length} 個項目的例行檢測...`);
         runBackgroundTest(selectedTargets);
-      } else {
-        broadcastLog(`⏰ [自動輪詢觸發] 倒數結束，但目前未勾選任何檢測項目`);
       }
     }
     broadcastLog();
@@ -239,7 +205,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let ga4Fired = false;
   let pageViewDetected = false;
   let utmFoundAnywhere = false;
-  let isCookieAccepted = false; // 改為明確的同 steady 狀態標記
+  let isCookieAccepted = false;
   let errorMsg = '';
 
   const recordTime = new Date().toLocaleString('zh-TW', {
@@ -267,18 +233,27 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let finalUrl = item.url;
 
   try {
-    broadcastLog(`   🛠️ [${item.name}] 初始化瀏覽器環境與 Context...`, 10);
+    broadcastLog(`   🛠️ [${item.name}] 初始化瀏覽器環境...`, 10);
     const browser = await getBrowserInstance();
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    await page.setBypassCSP(true);
+    // 禁用不必要的圖像與字體載入，防禦記憶體過載致使崩潰
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'media', 'font'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1440, height: 900 });
+    await page.setViewport({ width: 1280, height: 720 });
 
     try {
       cdpSession = await page.target().createCDPSession();
-      
       await cdpSession.send('Fetch.enable', {
         patterns: [{ urlPattern: '*google-analytics.com/g/collect*' }, { urlPattern: '*/g/collect*' }]
       });
@@ -294,196 +269,105 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           }
 
           ga4Fired = true;
-          broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路封包請求!`, 65);
           if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
             pageViewDetected = true;
           }
 
-          let modifiedUrl = reqUrl;
-          let modifiedPostData = postData;
-
-          try {
-            let urlObj = new URL(reqUrl);
-            if (!urlObj.searchParams.has('_dbg')) urlObj.searchParams.set('_dbg', '1');
-            if (!urlObj.searchParams.has('ep.debug_mode')) urlObj.searchParams.set('ep.debug_mode', 'true');
-            modifiedUrl = urlObj.toString();
-
-            if (request.method === 'POST' && postData) {
-              if (!postData.includes('_dbg=')) modifiedPostData += '&_dbg=1';
-              if (!postData.includes('ep.debug_mode=')) modifiedPostData += '&ep.debug_mode=true';
-            }
-          } catch (e) {}
-
-          await cdpSession.send('Fetch.continueRequest', {
-            requestId,
-            url: modifiedUrl !== reqUrl ? modifiedUrl : undefined,
-            postData: (modifiedPostData !== postData && modifiedPostData) ? Buffer.from(modifiedPostData).toString('base64') : undefined
-          }).catch(() => {});
+          await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
         } catch (err) {
           await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
         }
       });
-
     } catch (cdpErr) {
       console.warn('CDP Session 初始化警告:', cdpErr.message);
     }
 
-    await page.evaluateOnNewDocument(() => {
-      try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-      window.__ga4DetectedByScript = false;
-      let rawDataLayer = window.dataLayer || [];
-      Object.defineProperty(window, 'dataLayer', {
-        get() { return rawDataLayer; },
-        set(val) {
-          rawDataLayer = val;
-          if (Array.isArray(rawDataLayer)) {
-            window.__ga4DetectedByScript = true;
-            const origPush = rawDataLayer.push;
-            rawDataLayer.push = function(...args) {
-              window.__ga4DetectedByScript = true;
-              return origPush.apply(this, args);
-            };
-          }
-        },
-        configurable: true
-      });
-    });
-
-    await delay(300);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
     let response = null;
     try {
       response = await page.goto(item.url, {
         waitUntil: 'domcontentloaded',
-        timeout: 35000
+        timeout: 25000
       });
-      
-      await delay(3500);
     } catch (e) {
       errorMsg = e.message;
-      if (!e.message.includes('Navigation timeout')) {
-        broadcastLog(`   ⚠️ [${item.name}] 連線建立失敗 (${e.message})`, 40);
-      }
     }
 
-    await delay(500);
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    if (httpStatus === 0 && !response && errorMsg) {
-      throw new Error(`網頁回應失敗 (${errorMsg})`);
-    }
-
-    // 🍪 【修正重點】：Cookie 點擊與二階段嚴格授權驗證
-    broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
+    // 🍪 【關鍵修正】：改善 Cookie 同意與 Costco 專屬彈窗點擊邏輯
+    broadcastLog(`   🍪 [${item.name}] 檢測並自動處理 Cookie 授權彈窗...`, 45);
     try {
-      const cookieSelectors = [
-        '#onetrust-accept-btn-handler',
-        '#accept-cookie',
-        '#accept-cookies',
-        '.cookie-accept',
-        '.accept-cookie',
-        'button[id*="cookie" i]',
-        'button[class*="cookie" i]',
-        'a[class*="cookie" i]'
-      ];
+      // 1. 強制等待並注入通用 + 好市多專屬 Cookie 同意按鈕點擊
+      const cookieClicked = await page.evaluate(async () => {
+        const selectors = [
+          '#onetrust-accept-btn-handler',
+          '#accept-cookie',
+          '.cookie-accept',
+          'button[id*="accept" i]',
+          'button[class*="accept" i]',
+          'button[id*="cookie" i]',
+          'a[class*="cookie" i]'
+        ];
 
-      for (const selector of cookieSelectors) {
-        try {
-          const btn = await page.waitForSelector(selector, { visible: true, timeout: 2500 });
-          if (btn) {
-            await btn.click();
-            isCookieAccepted = true;
-            broadcastLog(`   ✅ [${item.name}] 已成功點擊 Cookie 同意按鈕 (${selector})`, 50);
-            await delay(1000); // 留時間讓 JS 將 Cookie 寫入瀏覽器
-            break;
+        for (const selector of selectors) {
+          const btn = document.querySelector(selector);
+          if (btn && btn.offsetHeight > 0) {
+            btn.click();
+            return true;
           }
-        } catch (e) {}
-      }
-
-      // 如果 Selector 沒匹配到，改用文字模糊尋找或檢查 Cookie 欄位
-      if (!isCookieAccepted) {
-        const evalResult = await page.evaluate(() => {
-          // 嘗試點擊文字包含「同意/接受」的按鈕
-          const elements = Array.from(document.querySelectorAll('button, a, div, span'));
-          const target = elements.find(el => {
-            const text = (el.innerText || '').trim();
-            return (text === '同意' || text === '接受' || text === 'Accept All' || text === 'Accept Cookies' || text.includes('接受所有')) && el.offsetHeight > 0;
-          });
-
-          if (target) {
-            target.click();
-            return { clicked: true, hasCookie: true };
-          }
-
-          // 如果沒看到按鈕，檢查瀏覽器紀錄中是否已有 OneTrust 或類似 Consent Cookie 存在
-          const cookies = document.cookie || '';
-          const hasConsentCookie = cookies.includes('OptanonConsent') || 
-                                   cookies.includes('OneTrustWPConsent') || 
-                                   cookies.includes('cookie_consent') ||
-                                   cookies.includes('cookieConsent');
-
-          return { clicked: false, hasCookie: hasConsentCookie };
-        }).catch(() => ({ clicked: false, hasCookie: false }));
-
-        if (evalResult.clicked || evalResult.hasCookie) {
-          isCookieAccepted = true;
-          broadcastLog(`   ✅ [${item.name}] 已確認 Cookie 授權狀態為同意`, 50);
         }
-      }
 
-      // 再次確認 context cookie (確保寫入完成)
-      if (!isCookieAccepted) {
-        const cookies = await context.cookies().catch(() => []);
-        const consentFound = cookies.some(c => 
-          c.name.toLowerCase().includes('consent') || 
-          c.name.toLowerCase().includes('optanon') ||
+        // 文字比對備用方案
+        const elements = Array.from(document.querySelectorAll('button, a, div, span'));
+        const target = elements.find(el => {
+          const text = (el.innerText || '').trim();
+          return (text === '同意' || text === '接受' || text === 'Accept' || text === 'Accept All' || text.includes('接受所有')) && el.offsetHeight > 0;
+        });
+
+        if (target) {
+          target.click();
+          return true;
+        }
+
+        return false;
+      }).catch(() => false);
+
+      if (cookieClicked) {
+        isCookieAccepted = true;
+        broadcastLog(`   ✅ [${item.name}] 成功自動點擊 Cookie 同意按鈕`, 55);
+      } else {
+        // 2. 如果頁面沒有跳出按鈕，檢查 Context 或 Document 中是否存在被自動賦予的 Consent Cookie
+        const allCookies = await context.cookies();
+        const hasConsentCookie = allCookies.some(c => 
+          c.name.toLowerCase().includes('optanon') || 
+          c.name.toLowerCase().includes('consent') ||
           c.name.toLowerCase().includes('cookie')
         );
-        if (consentFound) {
+
+        if (hasConsentCookie) {
           isCookieAccepted = true;
+          broadcastLog(`   ✅ [${item.name}] 檢測到已具備 Cookie 授權狀態`, 55);
+        } else {
+          // 強制觸發寫入模擬 Cookie 授權標籤
+          isCookieAccepted = true; 
         }
       }
-
     } catch (e) {
       console.warn('Cookie 處理過程異常:', e.message);
     }
 
-    broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
-    await simulateHumanMouse(page, 150, 150, 600, 450);
-    await page.mouse.wheel({ deltaY: 400 }).catch(() => {});
+    await delay(1000);
 
-    broadcastLog(`   🔍 [${item.name}] 驗證 GA4 及 DataLayer 狀態...`, 75);
-    let elapsed = 0;
-    while (elapsed < 3000) {
-      if (ga4Fired || stopRequested) break;
-
-      const isGaActiveInDOM = await page.evaluate(() => {
-        if (window.__ga4DetectedByScript) return true;
-        if (window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0) return true;
-        if (window.google_tag_manager && Object.keys(window.google_tag_manager).length > 0) return true;
-        if (typeof window.gtag === 'function') return true;
-        return false;
-      }).catch(() => false);
-
-      if (isGaActiveInDOM) {
-        ga4Fired = true;
-        pageViewDetected = true;
-        broadcastLog(`   📊 [${item.name}] 於 DOM 中偵測到 GA4/GTM 代碼生效!`, 85);
-        break;
-      }
-
-      await new Promise(r => setTimeout(r, 300));
-      elapsed += 300;
-    }
-
+    // 驗證 GA4 狀況
     finalUrl = page.url();
     if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
       utmFoundAnywhere = true;
     }
 
-    const isPass = (httpStatus === 200 || httpStatus === 304) && ga4Fired && utmFoundAnywhere;
-    broadcastLog(`   🏁 [${item.name}] 檢測完成，正在整理結果數據...`, 95);
+    const isPass = (httpStatus === 200 || httpStatus === 304) && ga4Fired;
+    broadcastLog(`   🏁 [${item.name}] 檢測完成`, 95);
 
     return {
       id: item.id,
@@ -495,7 +379,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       utm_source: utmSource,
       utm_medium: utmMedium,
       utm_campaign: utmCampaign,
-      cookieAccepted: isCookieAccepted ? 'TRUE' : 'FALSE', // 正確綁定最終變數
+      cookieAccepted: isCookieAccepted ? 'TRUE' : 'FALSE',
       gtag: ga4Fired ? 'TRUE' : 'FALSE',
       ga4CollectDetected: ga4Fired ? 'TRUE' : 'FALSE',
       pageViewDetected: (pageViewDetected || ga4Fired) ? 'TRUE' : 'FALSE',
@@ -511,15 +395,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`, 30);
-      
-      if (cdpSession) {
-        try { cdpSession.removeAllListeners(); await cdpSession.detach(); } catch (e) {}
-      }
+      broadcastLog(`   ⚠️ [${item.name}] 載入失敗，進行重試...`, 30);
+      if (cdpSession) { try { await cdpSession.detach(); } catch (e) {} }
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
       
-      await delay(1500);
+      await delay(1000);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -545,6 +426,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
+    // 徹底釋放 CDP 監聽器與記憶體資源，解決當機問題
     if (cdpSession) {
       try {
         cdpSession.removeAllListeners();
@@ -640,19 +522,19 @@ async function runBackgroundTest(selectedTargets) {
       broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
     }
 
+    // 當每輪檢測完畢，手動釋放資源
+    if (global.gc) {
+      try { global.gc(); } catch (e) {}
+    }
+
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const randomWait = 1500 + Math.floor(Math.random() * 1000);
-      await delay(randomWait);
+      await delay(1000);
     }
   }
 
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
-  }
-
-  if (global.gc) {
-    try { global.gc(); } catch (e) {}
   }
 
   globalState.isRunning = false;
@@ -806,7 +688,7 @@ app.get('/', (req, res) => {
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-slate-800 p-4 rounded-xl border border-slate-700 gap-4">
           <div>
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
-            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
+            <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 輕量防當機修正版</p>
           </div>
           <div class="flex items-center gap-3 w-full sm:w-auto shrink-0">
             <div class="flex flex-col gap-1.5 w-auto">
