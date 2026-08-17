@@ -68,7 +68,7 @@ let globalState = {
   currentLog: '',
   total: 0,
   current: 0,
-  itemProgress: 0, // 單一項目的進度 (0-100%)
+  itemProgress: 0,
   results: {},
   stats: {},
   autoCheck: {
@@ -118,13 +118,16 @@ async function getBrowserInstance() {
       '--lang=zh-TW,zh',
       '--disable-web-security',
       '--allow-running-insecure-content',
-      '--js-flags="--max-old-space-size=512"',
+      '--js-flags="--max-old-space-size=256"',
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-client-side-phishing-detection',
       '--disable-default-apps',
       '--disable-extensions',
-      '--disable-sync'
+      '--disable-sync',
+      '--disable-speech-api',
+      '--disable-print-preview',
+      '--mute-audio'
     ]
   });
 
@@ -132,7 +135,7 @@ async function getBrowserInstance() {
 }
 
 async function simulateHumanMouse(page, startX = 100, startY = 100, endX = 800, endY = 500) {
-  const steps = 10;
+  const steps = 8;
   const controlX1 = startX + (endX - startX) * 0.25 + (Math.random() * 100 - 50);
   const controlY1 = startY + (endY - startY) * 0.1 + (Math.random() * 100 - 50);
   const controlX2 = startX + (endX - startX) * 0.75 + (Math.random() * 100 - 50);
@@ -151,7 +154,7 @@ async function simulateHumanMouse(page, startX = 100, startY = 100, endX = 800, 
               Math.pow(t, 3) * endY;
 
     await page.mouse.move(x, y).catch(() => {});
-    await new Promise(r => setTimeout(r, 10 + Math.random() * 15));
+    await new Promise(r => setTimeout(r, 10 + Math.random() * 10));
   }
 }
 
@@ -167,7 +170,7 @@ function broadcastLog(logText, itemProgress = null) {
   const payload = {
     time: taipeiTime,
     log: globalState.currentLog,
-    percent: globalState.itemProgress, // 進度條改為顯示當前項目的進度%
+    percent: globalState.itemProgress,
     isRunning: globalState.isRunning,
     current: globalState.current,
     total: globalState.total,
@@ -269,6 +272,17 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
+    // 優化1：阻擋不必要的靜態資源 (圖片/媒體/樣式/字型)，減少系統 CPU 與記憶體負擔
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const resourceType = req.resourceType();
+      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setBypassCSP(true);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
@@ -348,21 +362,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    await delay(Math.floor(Math.random() * 1000) + 1000);
+    await delay(500);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
     let response = null;
     try {
       response = await page.goto(item.url, {
-        waitUntil: retryCount === 0 ? 'domcontentloaded' : 'load',
-        timeout: 35000
+        waitUntil: 'domcontentloaded',
+        timeout: 25000
       });
     } catch (e) {
       errorMsg = e.message;
       broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`, 40);
     }
 
-    await delay(1000);
+    await delay(500);
     const httpStatus = response ? response.status() : 0;
 
     if (httpStatus === 0 && !response) {
@@ -370,7 +384,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
-    // 自動點擊 Cookie 同意按鈕
     try {
       const cookieSelectors = [
         '#onetrust-accept-btn-handler',
@@ -420,7 +433,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     broadcastLog(`   🔍 [${item.name}] 驗證 GA4 及 DataLayer 狀態...`, 75);
     let elapsed = 0;
-    while (elapsed < 4000) {
+    while (elapsed < 3000) {
       if (ga4Fired || stopRequested) break;
 
       const isGaActiveInDOM = await page.evaluate(() => {
@@ -438,8 +451,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         break;
       }
 
-      await new Promise(r => setTimeout(r, 500));
-      elapsed += 500;
+      await new Promise(r => setTimeout(r, 300));
+      elapsed += 300;
     }
 
     finalUrl = page.url();
@@ -477,10 +490,13 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`, 30);
-      if (cdpSession) await cdpSession.detach().catch(() => {});
+      if (cdpSession) {
+        cdpSession.removeAllListeners();
+        await cdpSession.detach().catch(() => {});
+      }
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await delay(3000);
+      await delay(1500);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
@@ -506,9 +522,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    if (cdpSession) await cdpSession.detach().catch(() => {});
-    if (page) await page.close().catch(() => {});
-    if (context) await context.close().catch(() => {});
+    // 優化2：強制釋放 CDP Session 與 Page 事件防堵 Memory Leak
+    if (cdpSession) {
+      try { cdpSession.removeAllListeners(); } catch (e) {}
+      await cdpSession.detach().catch(() => {});
+    }
+    if (page) {
+      try { page.removeAllListeners(); } catch (e) {}
+      await page.close().catch(() => {});
+    }
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 }
 
@@ -588,9 +613,15 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const randomWait = 3000 + Math.floor(Math.random() * 2000);
+      const randomWait = 1500 + Math.floor(Math.random() * 1000);
       await delay(randomWait);
     }
+  }
+
+  // 優化3：主動清理 Browser 與垃圾回收
+  if (globalBrowser) {
+    await globalBrowser.close().catch(() => {});
+    globalBrowser = null;
   }
 
   if (global.gc) {
@@ -608,9 +639,6 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
 
-// -------------------------------------------------------------
-// 【匯出 GA4 報表格式 CSV 檔案 API 路由】
-// -------------------------------------------------------------
 app.get('/api/export-csv', (req, res) => {
   const results = globalState.results;
   const ids = Object.keys(results);
@@ -753,17 +781,16 @@ app.get('/', (req, res) => {
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
-          <!-- 修正 4：UI 匯出 csv 與清除次數按鈕改為上下排列 -->
-          <div class="flex items-center gap-3 w-full sm:w-auto">
-            <div class="flex flex-col gap-1.5 w-full sm:w-auto">
-              <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition border border-emerald-500 shadow-md flex items-center justify-center gap-1" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
-              <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold transition border border-slate-600 flex items-center justify-center gap-1">🧹 清除次數</button>
+          <!-- 優化：按鈕樣式修改，限制寬度並減小內距，避免過寬 -->
+          <div class="flex items-center gap-3 w-full sm:w-auto shrink-0">
+            <div class="flex flex-col gap-1.5 w-auto">
+              <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-bold transition border border-emerald-500 shadow-sm flex items-center justify-center whitespace-nowrap" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
+              <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1 rounded text-xs font-bold transition border border-slate-600 flex items-center justify-center whitespace-nowrap">🧹 清除次數</button>
             </div>
-            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
+            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-sky-500/20 transition whitespace-nowrap">🚀 執行測試</button>
           </div>
         </div>
 
-        <!-- 修正 3：進度條顯示單一項目進度與當前/總數狀態 -->
         <div id="progressContainer" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 space-y-1.5">
           <div class="flex justify-between text-xs text-sky-300 font-bold">
             <span id="progressStatusText">⏳ 正在處理中...</span>
@@ -864,15 +891,14 @@ app.get('/', (req, res) => {
 
             if (data.isRunning) {
               actionBtn.innerText = '🛑 停止測試';
-              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
+              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-rose-500/20 transition whitespace-nowrap';
               progressContainer.classList.remove('hidden');
               
-              // 修正 3：UI顯示單一項目的進度與當前/總數標示
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
               document.getElementById('progressPercentText').innerText = \`[\${data.current}/\${data.total}] \${data.percent}%\`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
-              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
+              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-sky-500/20 transition whitespace-nowrap';
               if (data.percent === 100 || data.percent === 0) {
                 setTimeout(() => progressContainer.classList.add('hidden'), 3000);
               }
@@ -950,7 +976,6 @@ app.get('/', (req, res) => {
           }
         }
 
-        // 修正 5：匯出 CSV 後透過隱藏 <a> 元素下載，不跳轉頁面並保留在主頁面
         function exportCSV() {
           const a = document.createElement('a');
           a.href = '/api/export-csv';
