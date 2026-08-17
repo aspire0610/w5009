@@ -740,7 +740,7 @@ app.get('/', (req, res) => {
             isRunningState = data.isRunning;
 
             if (data.isRunning) {
-              actionBtn.innerText = '🛑 停止測試';
+              actionBtn.innerText = '🛑 停止';
               actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
               progressContainer.classList.remove('hidden');
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
