@@ -279,7 +279,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try {
       cdpSession = await page.target().createCDPSession();
       
-      // 【修復 1】：僅針對 GA4 Collect 相關的請求做 CDP 攔截，減輕整體封包載重
+      // 僅針對 GA4 Collect 相關的請求做 CDP 攔截
       await cdpSession.send('Fetch.enable', {
         patterns: [{ urlPattern: '*google-analytics.com/g/collect*' }, { urlPattern: '*/g/collect*' }]
       });
@@ -321,7 +321,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             postData: (modifiedPostData !== postData && modifiedPostData) ? Buffer.from(modifiedPostData).toString('base64') : undefined
           }).catch(() => {});
         } catch (err) {
-          // 【修復 2】：保證無論發生任何錯誤，永遠不讓請求卡死
           await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
         }
       });
@@ -354,26 +353,20 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await delay(300);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
-           let response = null;
+    let response = null;
     try {
-      // 使用 Puppeteer 合法的 'domcontentloaded'，並將 timeout 調整為 35 秒
       response = await page.goto(item.url, {
         waitUntil: 'domcontentloaded',
         timeout: 35000
       });
       
-      // 留給網頁 3.5 秒載入背景 GA4 與 DataLayer SDK
       await delay(3500);
     } catch (e) {
       errorMsg = e.message;
-      // 若非單純的 Timeout，才印出失敗日誌
       if (!e.message.includes('Navigation timeout')) {
         broadcastLog(`   ⚠️ [${item.name}] 連線建立失敗 (${e.message})`, 40);
       }
     }
-
-
-
 
     await delay(500);
     const httpStatus = response ? response.status() : (page ? 200 : 0);
@@ -382,6 +375,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error(`網頁回應失敗 (${errorMsg})`);
     }
 
+    // ===== 更新後的 Cookie 處理段落 =====
     broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
     try {
       const cookieSelectors = [
@@ -390,41 +384,54 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         '#accept-cookies',
         '.cookie-accept',
         '.accept-cookie',
-        'button[id*="cookie"]',
-        'button[class*="cookie"]',
-        'a[class*="cookie"]'
+        'button[id*="cookie" i]',
+        'button[class*="cookie" i]',
+        'a[class*="cookie" i]'
       ];
 
+      // 1. 等待 Cookie 彈窗出現 (給予最多 3 秒動態渲染時間)
       for (const selector of cookieSelectors) {
-        const btn = await page.$(selector);
-        if (btn) {
-          await btn.click().catch(() => {});
-          cookieClicked = true;
-          broadcastLog(`   ✅ [${item.name}] 已成功自動點擊 Cookie 同意按鈕 (${selector})`, 50);
-          break;
+        try {
+          const btn = await page.waitForSelector(selector, { visible: true, timeout: 3000 });
+          if (btn) {
+            await btn.click();
+            cookieClicked = true;
+            broadcastLog(`   ✅ [${item.name}] 已成功點擊 Cookie 同意按鈕 (${selector})`, 50);
+            break;
+          }
+        } catch (e) {
+          // Selector 逾時未出現則繼續測試下一個
         }
       }
 
+      // 2. 若萬用選擇器未抓到，改用文字特徵與 Cookie 寫入狀態二次確認
       if (!cookieClicked) {
         cookieClicked = await page.evaluate(() => {
-          const elements = Array.from(document.querySelectorAll('button, a, div'));
+          // 搜尋可點擊的同意按鈕
+          const elements = Array.from(document.querySelectorAll('button, a, div, span'));
           const target = elements.find(el => {
             const text = (el.innerText || '').trim();
-            return text.includes('同意') || text.includes('Accept All') || text.includes('Accept Cookies') || text.includes('接受');
+            return (text === '同意' || text === '接受' || text === 'Accept All' || text === 'Accept Cookies' || text.includes('接受所有')) && el.offsetHeight > 0;
           });
           if (target) {
             target.click();
             return true;
           }
+          // 若網站本身已有 Cookie 授權紀錄 (例如 OptanonConsent)
+          if (document.cookie.includes('OptanonConsent') || document.cookie.includes('OneTrustWPConsent')) {
+            return true;
+          }
           return false;
         }).catch(() => false);
+
         if (cookieClicked) {
-          broadcastLog(`   ✅ [${item.name}] 已通過文字特徵自動點擊 Cookie 同意按鈕`, 50);
+          broadcastLog(`   ✅ [${item.name}] 已確認 Cookie 授權狀態為同意`, 50);
         }
       }
     } catch (e) {
       console.warn('Cookie 點擊嘗試失敗:', e.message);
     }
+    // ====================================
 
     broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
     await simulateHumanMouse(page, 150, 150, 600, 450);
@@ -490,7 +497,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (retryCount < 1) {
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`, 30);
       
-      // 清理資源後重試
       if (cdpSession) {
         try { cdpSession.removeAllListeners(); await cdpSession.detach(); } catch (e) {}
       }
@@ -523,7 +529,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    // 【修復 3】：強迫釋放 CDP、Page 與 BrowserContext 避免記憶體暴增導致當機
     if (cdpSession) {
       try {
         cdpSession.removeAllListeners();
@@ -625,7 +630,6 @@ async function runBackgroundTest(selectedTargets) {
     }
   }
 
-  // 【修復 4】：每次檢測批次結束後重置主瀏覽器實例，清空所有殘留記憶體
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
