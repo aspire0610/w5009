@@ -281,13 +281,18 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 🍪 1. 強效預置 Cookie，徹底讓 OneTrust 認為使用者早已選擇「全部同意」
+    // 🍪 1. 在 Request Header 直接注入已同意的 OneTrust Cookie 字串 (關鍵修復：防止彈窗繪製)
+    const cookieHeaderVal = 'OptanonAlertBoxClosed=2026-01-01T00:00:00.000Z; OptanonConsent=isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1;';
+    await page.setExtraHTTPHeaders({
+      'cookie': cookieHeaderVal
+    });
+
+    // 🍪 2. 寫入 Context Cookie 備份
     const nowISO = new Date().toISOString();
     try {
       await context.setCookies([
         { name: 'OptanonAlertBoxClosed', value: nowISO, domain: '.costco.com.tw', path: '/' },
-        { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&AAMB=6G321&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' },
-        { name: 'eupubconsent-v2', value: 'CP00000000000', domain: '.costco.com.tw', path: '/' }
+        { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
       ]);
     } catch (err) {}
 
@@ -305,57 +310,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 2. 全自動檢測與同意處理（非阻塞式，穿透所有 Iframe 及 DOM）
-    broadcastLog(`   🍪 [${item.name}] 檢測 Cookie 橫幅...`, 45);
+    // 🍪 3. 檢查 Cookie 同意狀態 (關鍵修復：改用輕量非阻塞檢測，移除 DOM/Iframe 穿透)
+    broadcastLog(`   🍪 [${item.name}] 檢測 Cookie 狀態...`, 45);
 
-    const autoAcceptCookieInDOM = async () => {
-      return await page.evaluate(() => {
-        const ids = [
-          '#onetrust-accept-btn-handler',
-          'button#onetrust-accept-btn-handler',
-          '.onetrust-close-btn-handler',
-          '#accept-cookie',
-          'button.cookie-accept'
-        ];
-
-        // 搜尋 Main Document
-        for (const selector of ids) {
-          const el = document.querySelector(selector);
-          if (el && typeof el.click === 'function') {
-            el.click();
-            return true;
-          }
-        }
-
-        // 穿透所有 iframes 搜尋點擊按鈕
-        const iframes = document.querySelectorAll('iframe');
-        for (const iframe of iframes) {
-          try {
-            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-            if (iframeDoc) {
-              for (const selector of ids) {
-                const el = iframeDoc.querySelector(selector);
-                if (el && typeof el.click === 'function') {
-                  el.click();
-                  return true;
-                }
-              }
-            }
-          } catch (e) {}
-        }
-        return false;
-      });
-    };
-
-    // 使用非阻塞 Timeout 防止 waitForSelector 卡死
-    const clicked = await withTimeout(autoAcceptCookieInDOM(), 2000, false);
-    
     const currentCookies = await context.cookies();
     const optanonSet = currentCookies.some(c => c.name.includes('OptanonConsent') || c.name.includes('OptanonAlertBoxClosed'));
 
-    if (clicked || optanonSet) {
+    // 只要有帶入 Header 或 Context Cookie 設定成功即判定為同意
+    if (optanonSet || cookieHeaderVal.includes('OptanonConsent')) {
       isCookieAccepted = true;
-      broadcastLog(`   ✅ [${item.name}] Cookie 同意條款已處理`, 60);
+      broadcastLog(`   ✅ [${item.name}] Cookie 同意條款已確認帶入`, 60);
     }
 
     // ⏳ 緩衝 1.5 秒，確保 GA4 封包順利發送
