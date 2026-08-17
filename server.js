@@ -279,7 +279,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     try {
       cdpSession = await page.target().createCDPSession();
       
-      // 僅針對 GA4 Collect 相關的請求做 CDP 攔截
       await cdpSession.send('Fetch.enable', {
         patterns: [{ urlPattern: '*google-analytics.com/g/collect*' }, { urlPattern: '*/g/collect*' }]
       });
@@ -375,7 +374,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error(`網頁回應失敗 (${errorMsg})`);
     }
 
-    // ===== 更新後的 Cookie 處理段落 =====
+    // Cookie 點擊與處理
     broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
     try {
       const cookieSelectors = [
@@ -389,7 +388,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         'a[class*="cookie" i]'
       ];
 
-      // 1. 等待 Cookie 彈窗出現 (給予最多 3 秒動態渲染時間)
       for (const selector of cookieSelectors) {
         try {
           const btn = await page.waitForSelector(selector, { visible: true, timeout: 3000 });
@@ -399,15 +397,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             broadcastLog(`   ✅ [${item.name}] 已成功點擊 Cookie 同意按鈕 (${selector})`, 50);
             break;
           }
-        } catch (e) {
-          // Selector 逾時未出現則繼續測試下一個
-        }
+        } catch (e) {}
       }
 
-      // 2. 若萬用選擇器未抓到，改用文字特徵與 Cookie 寫入狀態二次確認
       if (!cookieClicked) {
         cookieClicked = await page.evaluate(() => {
-          // 搜尋可點擊的同意按鈕
           const elements = Array.from(document.querySelectorAll('button, a, div, span'));
           const target = elements.find(el => {
             const text = (el.innerText || '').trim();
@@ -417,7 +411,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
             target.click();
             return true;
           }
-          // 若網站本身已有 Cookie 授權紀錄 (例如 OptanonConsent)
           if (document.cookie.includes('OptanonConsent') || document.cookie.includes('OneTrustWPConsent')) {
             return true;
           }
@@ -431,7 +424,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     } catch (e) {
       console.warn('Cookie 點擊嘗試失敗:', e.message);
     }
-    // ====================================
 
     broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
     await simulateHumanMouse(page, 150, 150, 600, 450);
@@ -888,7 +880,7 @@ app.get('/', (req, res) => {
             if (data.log) {
               const terminalBox = document.getElementById('terminalBox');
               const line = document.createElement('div');
-              line.innerText = \`[\${data.time}] \${data.log}\`;
+              line.innerText = `[\${data.time}] \${data.log}`;
               terminalBox.appendChild(line);
               terminalBox.scrollTop = terminalBox.scrollHeight;
               document.getElementById('progressStatusText').innerText = data.log;
@@ -904,8 +896,8 @@ app.get('/', (req, res) => {
               actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-rose-500/20 transition whitespace-nowrap';
               progressContainer.classList.remove('hidden');
               
-              document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
-              document.getElementById('progressPercentText').innerText = \`[\${data.current}/\${data.total}] \${data.percent}%\`;
+              document.getElementById('progressBar').style.width = `\${data.percent}%`;
+              document.getElementById('progressPercentText').innerText = `[\${data.current}/\${data.total}] \${data.percent}%`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
               actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-4 py-3 rounded-lg font-bold shadow-md shadow-sky-500/20 transition whitespace-nowrap';
@@ -927,8 +919,8 @@ app.get('/', (req, res) => {
                   const sec = data.autoCheck.remainingSeconds;
                   const m = Math.floor(sec / 60);
                   const s = sec % 60;
-                  const runsInfo = data.autoCheck.maxRuns > 0 ? \` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})\` : '';
-                  countdownText.textContent = \`⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}\`;
+                  const runsInfo = data.autoCheck.maxRuns > 0 ? ` (\${data.autoCheck.currentRunCount}/\${data.autoCheck.maxRuns})` : '';
+                  countdownText.textContent = `⏳ \${m.toString().padStart(2, '0')}:\${s.toString().padStart(2, '0')}\${runsInfo}`;
                   countdownText.className = 'text-amber-400 font-mono font-bold';
                 }
               } else {
@@ -1041,7 +1033,7 @@ app.get('/', (req, res) => {
               displayDomain = u.origin + u.pathname.substring(0, 15) + '...';
             } catch(e) {}
 
-            return \`
+            return `
               <div id="card-\${t.id}" data-id="\${t.id}" class="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3 transition-all duration-300">
                 <div class="flex items-start justify-between space-x-3 gap-2">
                   <div class="flex items-start space-x-3 min-w-0 flex-1">
@@ -1074,7 +1066,7 @@ app.get('/', (req, res) => {
                   </div>
                 </div>
               </div>
-            \`;
+            `;
           }).join('');
         }
 
@@ -1110,7 +1102,7 @@ app.get('/', (req, res) => {
 
         function updateCount() {
           const checked = document.querySelectorAll('.target-checkbox:checked').length;
-          document.getElementById('selectedCount').textContent = \`已勾選: \${checked}\`;
+          document.getElementById('selectedCount').textContent = `已勾選: \${checked}`;
         }
 
         async function toggleTest() {
