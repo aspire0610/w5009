@@ -4,16 +4,14 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 引入 puppeteer-extra 並掛載 Stealth 隱身外掛
+// 引入 puppeteer-extra 並掛載 Stealth 隱蔽外掛
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
-// 啟用 Stealth 補丁，協助繞過 Akamai / Cloudflare 指紋檢測
 const stealth = StealthPlugin();
-stealth.enabledEvasions.delete('iframe.contentWindow'); // 防止部分 CDP 偵測腳本崩潰
+stealth.enabledEvasions.delete('iframe.contentWindow');
 puppeteer.use(stealth);
 
-// 隨機延遲工具函式
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.use(express.json());
@@ -235,13 +233,33 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let page = null;
   let cdpSession = null;
   let ga4Fired = false;
+  let pageViewDetected = false;
   let utmFoundAnywhere = false;
-  let targetCampaign = '';
+  let errorMsg = '';
+
+  const recordTime = new Date().toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+
+  let utmSource = '';
+  let utmMedium = '';
+  let utmCampaign = '';
 
   try {
     const urlObj = new URL(item.url);
-    targetCampaign = (urlObj.searchParams.get('utm_campaign') || '').toLowerCase();
+    utmSource = urlObj.searchParams.get('utm_source') || '';
+    utmMedium = urlObj.searchParams.get('utm_medium') || '';
+    utmCampaign = urlObj.searchParams.get('utm_campaign') || '';
   } catch (e) {}
+
+  let finalUrl = item.url;
 
   try {
     const browser = await getBrowserInstance();
@@ -254,16 +272,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     try {
       cdpSession = await page.target().createCDPSession();
-      await cdpSession.send('Fetch.enable', {
-        patterns: [{ urlPattern: '*' }]
-      });
+      await cdpSession.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
 
       cdpSession.on('Fetch.requestPaused', async (event) => {
         const { requestId, request } = event;
         let reqUrl = request.url;
         let postData = request.postData || '';
 
-        if (targetCampaign && (reqUrl.toLowerCase().includes(targetCampaign) || postData.toLowerCase().includes(targetCampaign))) {
+        if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
           utmFoundAnywhere = true;
         }
 
@@ -276,10 +292,10 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         let modifiedPostData = postData;
 
         if (isGA4Collect) {
-          if (!ga4Fired) {
-            broadcastLog(`   📡 [${item.name}] [CDP 攔截] 捕獲 GA4 collect 封包，正在注入 debug_mode...`);
-          }
           ga4Fired = true;
+          if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
+            pageViewDetected = true;
+          }
 
           try {
             let urlObj = new URL(reqUrl);
@@ -309,19 +325,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     await page.evaluateOnNewDocument(() => {
       try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-      try {
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-          if (parameter === 37445) return 'Google Inc. (NVIDIA)';
-          if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-          return getParameter.apply(this, arguments);
-        };
-      } catch (e) {}
-      try {
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-      } catch (e) {}
-
       window.__ga4DetectedByScript = false;
       let rawDataLayer = window.dataLayer || [];
       Object.defineProperty(window, 'dataLayer', {
@@ -341,9 +344,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    const preBufferTime = Math.floor(Math.random() * 2000) + 2000;
-    await delay(preBufferTime);
-
+    await delay(Math.floor(Math.random() * 1500) + 1500);
     broadcastLog(`   🔗 [${item.name}] 跳轉至目標連結...`);
     
     let response = null;
@@ -353,24 +354,22 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         timeout: 35000
       });
     } catch (e) {
+      errorMsg = e.message;
       broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`);
     }
 
-    await delay(Math.floor(Math.random() * 1500) + 1000);
-
+    await delay(1000);
     const httpStatus = response ? response.status() : 0;
 
     if (httpStatus === 0 && !response) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    broadcastLog(`   🖱️ [${item.name}] 執行真人軌跡移動與頁面滾動...`);
     await simulateHumanMouse(page, 150, 150, 600, 450);
     await page.mouse.wheel({ deltaY: 400 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 500));
 
     let elapsed = 0;
-    while (elapsed < 5000) {
+    while (elapsed < 4000) {
       if (ga4Fired || stopRequested) break;
 
       const isGaActiveInDOM = await page.evaluate(() => {
@@ -378,17 +377,12 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         if (window.dataLayer && Array.isArray(window.dataLayer) && window.dataLayer.length > 0) return true;
         if (window.google_tag_manager && Object.keys(window.google_tag_manager).length > 0) return true;
         if (typeof window.gtag === 'function') return true;
-
-        const scripts = Array.from(document.querySelectorAll('script[src]'));
-        return scripts.some(s => {
-          const src = s.src.toLowerCase();
-          return src.includes('googletagmanager.com') || src.includes('google-analytics.com');
-        });
+        return false;
       }).catch(() => false);
 
       if (isGaActiveInDOM) {
         ga4Fired = true;
-        broadcastLog(`   📡 [${item.name}] 經由 DOM 物件確認 GA4 啟用成功！`);
+        pageViewDetected = true;
         break;
       }
 
@@ -396,16 +390,30 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       elapsed += 500;
     }
 
-    const finalUrl = page.url().toLowerCase();
-    if (targetCampaign && finalUrl.includes(targetCampaign)) {
+    finalUrl = page.url();
+    if (utmCampaign && finalUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
       utmFoundAnywhere = true;
     }
+
+    const isPass = httpStatus === 200 && ga4Fired && utmFoundAnywhere;
 
     return {
       id: item.id,
       name: item.name,
+      time: recordTime,
+      campaign: utmCampaign || item.name,
+      status: isPass ? 'PASS' : 'FAIL',
+      httpStatus: httpStatus,
+      utm_source: utmSource,
+      utm_medium: utmMedium,
+      utm_campaign: utmCampaign,
+      cookieAccepted: 'FALSE',
+      gtag: ga4Fired ? 'TRUE' : 'FALSE',
+      ga4CollectDetected: ga4Fired ? 'TRUE' : 'FALSE',
+      pageViewDetected: (pageViewDetected || ga4Fired) ? 'TRUE' : 'FALSE',
+      finalUrl: finalUrl,
+      error: errorMsg,
       url: item.url,
-      status: httpStatus,
       statusText: httpStatus === 200 ? '正常(200)' : `HTTP ${httpStatus}`,
       utmKept: utmFoundAnywhere ? '保留' : '丟失/未帶入',
       ga4Exist: ga4Fired ? '存在' : '缺失'
@@ -415,19 +423,31 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，將於 3.5 秒後進行第 2 次重試...`);
+      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
       if (cdpSession) await cdpSession.detach().catch(() => {});
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
-      await delay(3500);
+      await delay(3000);
       return await checkUrlWithPuppeteer(item, retryCount + 1);
     }
 
     return {
       id: item.id,
       name: item.name,
+      time: recordTime,
+      campaign: utmCampaign || item.name,
+      status: 'FAIL',
+      httpStatus: 0,
+      utm_source: utmSource,
+      utm_medium: utmMedium,
+      utm_campaign: utmCampaign,
+      cookieAccepted: 'FALSE',
+      gtag: 'FALSE',
+      ga4CollectDetected: 'FALSE',
+      pageViewDetected: 'FALSE',
+      finalUrl: finalUrl,
+      error: error.message || '連線失敗',
       url: item.url,
-      status: 0,
       statusText: '連線失敗',
       utmKept: '無',
       ga4Exist: '無'
@@ -470,7 +490,27 @@ async function runBackgroundTest(selectedTargets) {
         broadcastLog(`🛑 測試中斷，已跳過後續項目`);
         break;
       }
-      result = { id: item.id, name: item.name, url: item.url, status: 0, statusText: '連線失敗', utmKept: '無', ga4Exist: '無' };
+      result = {
+        id: item.id,
+        name: item.name,
+        time: new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
+        campaign: item.name,
+        status: 'FAIL',
+        httpStatus: 0,
+        utm_source: '',
+        utm_medium: '',
+        utm_campaign: '',
+        cookieAccepted: 'FALSE',
+        gtag: 'FALSE',
+        ga4CollectDetected: 'FALSE',
+        pageViewDetected: 'FALSE',
+        finalUrl: item.url,
+        error: '連線失敗',
+        url: item.url,
+        statusText: '連線失敗',
+        utmKept: '無',
+        ga4Exist: '無'
+      };
     }
 
     if (stopRequested) break;
@@ -482,8 +522,7 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
       }
 
-      const isStatusOk = (result.status === 200);
-      const isPass = isStatusOk && result.utmKept === '保留' && result.ga4Exist === '存在';
+      const isPass = result.status === 'PASS';
 
       globalState.stats[item.id].total += 1;
       if (isPass) {
@@ -492,11 +531,11 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id].fail += 1;
       }
 
-      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.statusText} | UTM:${result.utmKept} | GA4:${result.ga4Exist})`);
+      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`);
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
-      const randomWait = 4000 + Math.floor(Math.random() * 3000);
+      const randomWait = 3000 + Math.floor(Math.random() * 2000);
       await delay(randomWait);
     }
   }
@@ -517,7 +556,7 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 app.get('/api/targets', (req, res) => res.json(targetList));
 
 // -------------------------------------------------------------
-// 【匯出 CSV 檔案 API 路由】
+// 【匯出 GA4 報表格式 CSV 檔案 API 路由】
 // -------------------------------------------------------------
 app.get('/api/export-csv', (req, res) => {
   const results = globalState.results;
@@ -527,24 +566,53 @@ app.get('/api/export-csv', (req, res) => {
     return res.status(400).send('目前尚無檢測結果資料可匯出');
   }
 
-  // CSV 表頭
-  let csvContent = 'ID,項目名稱,連線狀態,UTM參數,GA4觸發,目標網址\n';
+  // 完全對齊附檔 GA4 測試結果之欄位表頭
+  const headers = [
+    'time',
+    'campaign',
+    'status',
+    'httpStatus',
+    'utm_source',
+    'utm_medium',
+    'utm_campaign',
+    'cookieAccepted',
+    'gtag',
+    'ga4CollectDetected',
+    'pageViewDetected',
+    'finalUrl',
+    'error'
+  ];
 
-  // 組合內容 (若包含雙引號或逗號則予以處理)
+  let csvContent = headers.join(',') + '\n';
+
   ids.forEach(id => {
     const item = results[id];
-    const cleanName = `"${(item.name || '').replace(/"/g, '""')}"`;
-    const cleanUrl = `"${(item.url || '').replace(/"/g, '""')}"`;
 
-    csvContent += `${item.id},${cleanName},${item.statusText},${item.utmKept},${item.ga4Exist},${cleanUrl}\n`;
+    const row = [
+      `"${item.time || ''}"`,
+      `"${(item.campaign || '').replace(/"/g, '""')}"`,
+      `"${item.status || 'FAIL'}"`,
+      item.httpStatus || 0,
+      `"${(item.utm_source || '').replace(/"/g, '""')}"`,
+      `"${(item.utm_medium || '').replace(/"/g, '""')}"`,
+      `"${(item.utm_campaign || '').replace(/"/g, '""')}"`,
+      `"${item.cookieAccepted || 'FALSE'}"`,
+      `"${item.gtag || 'FALSE'}"`,
+      `"${item.ga4CollectDetected || 'FALSE'}"`,
+      `"${item.pageViewDetected || 'FALSE'}"`,
+      `"${(item.finalUrl || item.url || '').replace(/"/g, '""')}"`,
+      `"${(item.error || '').replace(/"/g, '""')}"`
+    ];
+
+    csvContent += row.join(',') + '\n';
   });
 
-  // 加入 UTF-8 BOM 避免 Excel 開啟繁體中文亂碼
+  // UTF-8 BOM 防 Excel 開啟中文亂碼
   const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
   const buffer = Buffer.concat([bom, Buffer.from(csvContent, 'utf-8')]);
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const fileName = `test_results_${timestamp}.csv`;
+  const fileName = `utm-ga4-test-result_${timestamp}.csv`;
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -635,9 +703,9 @@ app.get('/', (req, res) => {
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
-            <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold transition border border-emerald-500 shrink-0 shadow-md" title="將目前的測試結果導出為 CSV 檔">📥 匯出 CSV</button>
-            <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
-            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行</button>
+            <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold transition border border-emerald-500 shrink-0 shadow-md" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
+            <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0">🧹 清除次數</button>
+            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
           </div>
         </div>
 
@@ -740,13 +808,13 @@ app.get('/', (req, res) => {
             isRunningState = data.isRunning;
 
             if (data.isRunning) {
-              actionBtn.innerText = '🛑 停止';
+              actionBtn.innerText = '🛑 停止測試';
               actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
               progressContainer.classList.remove('hidden');
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
               document.getElementById('progressPercentText').innerText = \`\${data.percent}%\`;
             } else {
-              actionBtn.innerText = '🚀 執行';
+              actionBtn.innerText = '🚀 執行測試';
               actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
               if (data.percent === 100 || data.percent === 0) {
                 setTimeout(() => progressContainer.classList.add('hidden'), 3000);
@@ -825,7 +893,6 @@ app.get('/', (req, res) => {
           }
         }
 
-        // 前端觸發 CSV 下載函式
         function exportCSV() {
           window.location.href = '/api/export-csv';
         }
@@ -834,7 +901,7 @@ app.get('/', (req, res) => {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          const isOkStatus = (r.status === 200);
+          const isOkStatus = (r.httpStatus === 200);
           const statusEl = card.querySelector('.status-val');
           statusEl.textContent = isOkStatus ? '✅ ' + r.statusText : '❌ ' + r.statusText;
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
