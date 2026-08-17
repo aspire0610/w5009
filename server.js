@@ -68,6 +68,7 @@ let globalState = {
   currentLog: '',
   total: 0,
   current: 0,
+  itemProgress: 0, // 單一項目的進度 (0-100%)
   results: {},
   stats: {},
   autoCheck: {
@@ -154,9 +155,9 @@ async function simulateHumanMouse(page, startX = 100, startY = 100, endX = 800, 
   }
 }
 
-function broadcastLog(logText) {
+function broadcastLog(logText, itemProgress = null) {
   if (logText) globalState.currentLog = logText;
-  const percent = globalState.total > 0 ? Math.round((globalState.current / globalState.total) * 100) : 0;
+  if (itemProgress !== null) globalState.itemProgress = itemProgress;
 
   const taipeiTime = new Date().toLocaleTimeString('zh-TW', {
     hour12: false,
@@ -166,7 +167,7 @@ function broadcastLog(logText) {
   const payload = {
     time: taipeiTime,
     log: globalState.currentLog,
-    percent: percent,
+    percent: globalState.itemProgress, // 進度條改為顯示當前項目的進度%
     isRunning: globalState.isRunning,
     current: globalState.current,
     total: globalState.total,
@@ -235,6 +236,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let ga4Fired = false;
   let pageViewDetected = false;
   let utmFoundAnywhere = false;
+  let cookieClicked = false;
   let errorMsg = '';
 
   const recordTime = new Date().toLocaleString('zh-TW', {
@@ -262,6 +264,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
   let finalUrl = item.url;
 
   try {
+    broadcastLog(`   🛠️ [${item.name}] 初始化瀏覽器環境與 Context...`, 10);
     const browser = await getBrowserInstance();
     context = await browser.createBrowserContext();
     page = await context.newPage();
@@ -293,6 +296,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
         if (isGA4Collect) {
           ga4Fired = true;
+          broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路封包請求!`, 65);
           if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
             pageViewDetected = true;
           }
@@ -344,8 +348,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    await delay(Math.floor(Math.random() * 1500) + 1500);
-    broadcastLog(`   🔗 [${item.name}] 跳轉至目標連結...`);
+    await delay(Math.floor(Math.random() * 1000) + 1000);
+    broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
     let response = null;
     try {
@@ -355,7 +359,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     } catch (e) {
       errorMsg = e.message;
-      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`);
+      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`, 40);
     }
 
     await delay(1000);
@@ -365,9 +369,56 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
+    broadcastLog(`   🍪 [${item.name}] 檢查並自動點擊 Cookie 同意按鈕...`, 45);
+    // 自動點擊 Cookie 同意按鈕
+    try {
+      const cookieSelectors = [
+        '#onetrust-accept-btn-handler',
+        '#accept-cookie',
+        '#accept-cookies',
+        '.cookie-accept',
+        '.accept-cookie',
+        'button[id*="cookie"]',
+        'button[class*="cookie"]',
+        'a[class*="cookie"]'
+      ];
+
+      for (const selector of cookieSelectors) {
+        const btn = await page.$(selector);
+        if (btn) {
+          await btn.click().catch(() => {});
+          cookieClicked = true;
+          broadcastLog(`   ✅ [${item.name}] 已成功自動點擊 Cookie 同意按鈕 (${selector})`, 50);
+          break;
+        }
+      }
+
+      if (!cookieClicked) {
+        cookieClicked = await page.evaluate(() => {
+          const elements = Array.from(document.querySelectorAll('button, a, div'));
+          const target = elements.find(el => {
+            const text = (el.innerText || '').trim();
+            return text.includes('同意') || text.includes('Accept All') || text.includes('Accept Cookies') || text.includes('接受');
+          });
+          if (target) {
+            target.click();
+            return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (cookieClicked) {
+          broadcastLog(`   ✅ [${item.name}] 已通過文字特徵自動點擊 Cookie 同意按鈕`, 50);
+        }
+      }
+    } catch (e) {
+      console.warn('Cookie 點擊嘗試失敗:', e.message);
+    }
+
+    broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
     await simulateHumanMouse(page, 150, 150, 600, 450);
     await page.mouse.wheel({ deltaY: 400 }).catch(() => {});
 
+    broadcastLog(`   🔍 [${item.name}] 驗證 GA4 及 DataLayer 狀態...`, 75);
     let elapsed = 0;
     while (elapsed < 4000) {
       if (ga4Fired || stopRequested) break;
@@ -383,6 +434,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       if (isGaActiveInDOM) {
         ga4Fired = true;
         pageViewDetected = true;
+        broadcastLog(`   📊 [${item.name}] 於 DOM 中偵測到 GA4/GTM 代碼生效!`, 85);
         break;
       }
 
@@ -396,6 +448,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     }
 
     const isPass = httpStatus === 200 && ga4Fired && utmFoundAnywhere;
+    broadcastLog(`   🏁 [${item.name}] 檢測完成，正在整理結果數據...`, 95);
 
     return {
       id: item.id,
@@ -407,7 +460,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       utm_source: utmSource,
       utm_medium: utmMedium,
       utm_campaign: utmCampaign,
-      cookieAccepted: 'FALSE',
+      cookieAccepted: cookieClicked ? 'TRUE' : 'FALSE',
       gtag: ga4Fired ? 'TRUE' : 'FALSE',
       ga4CollectDetected: ga4Fired ? 'TRUE' : 'FALSE',
       pageViewDetected: (pageViewDetected || ga4Fired) ? 'TRUE' : 'FALSE',
@@ -423,7 +476,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`);
+      broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，進行第 2 次重試...`, 30);
       if (cdpSession) await cdpSession.detach().catch(() => {});
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
@@ -467,11 +520,11 @@ async function runBackgroundTest(selectedTargets) {
 
   globalState.results = {};
 
-  broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`);
+  broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`, 0);
 
   for (const [index, item] of selectedTargets.entries()) {
     if (stopRequested) {
-      broadcastLog(`🛑 收到停止指令，測試已中斷！`);
+      broadcastLog(`🛑 收到停止指令，測試已中斷！`, 0);
       break;
     }
 
@@ -480,14 +533,14 @@ async function runBackgroundTest(selectedTargets) {
     }
 
     globalState.current = index + 1;
-    broadcastLog(`▶️ [${index + 1}/${selectedTargets.length}] 開始檢測: ${item.name}`);
+    broadcastLog(`▶️ [${index + 1}/${selectedTargets.length}] 開始檢測: ${item.name}`, 0);
 
     let result;
     try {
       result = await checkUrlWithPuppeteer(item);
     } catch (err) {
       if (stopRequested) {
-        broadcastLog(`🛑 測試中斷，已跳過後續項目`);
+        broadcastLog(`🛑 測試中斷，已跳過後續項目`, 0);
         break;
       }
       result = {
@@ -531,7 +584,7 @@ async function runBackgroundTest(selectedTargets) {
         globalState.stats[item.id].fail += 1;
       }
 
-      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`);
+      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
     }
 
     if (index < selectedTargets.length - 1 && !stopRequested) {
@@ -547,7 +600,7 @@ async function runBackgroundTest(selectedTargets) {
   globalState.isRunning = false;
   if (!stopRequested) {
     const finishTime = new Date().toLocaleTimeString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
-    broadcastLog(`✨ 本輪檢測完成！(${finishTime})`);
+    broadcastLog(`✨ 本輪檢測完成！(${finishTime})`, 100);
   }
 }
 
@@ -566,7 +619,6 @@ app.get('/api/export-csv', (req, res) => {
     return res.status(400).send('目前尚無檢測結果資料可匯出');
   }
 
-  // 完全對齊附檔 GA4 測試結果之欄位表頭
   const headers = [
     'time',
     'campaign',
@@ -607,7 +659,6 @@ app.get('/api/export-csv', (req, res) => {
     csvContent += row.join(',') + '\n';
   });
 
-  // UTF-8 BOM 防 Excel 開啟中文亂碼
   const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
   const buffer = Buffer.concat([bom, Buffer.from(csvContent, 'utf-8')]);
 
@@ -702,13 +753,17 @@ app.get('/', (req, res) => {
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
-          <div class="flex items-center gap-2 w-full sm:w-auto">
-            <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold transition border border-emerald-500 shrink-0 shadow-md" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
-            <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0">🧹 清除次數</button>
-            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
+          <!-- 修正 4：UI 匯出 csv 與清除次數按鈕改為上下排列 -->
+          <div class="flex items-center gap-3 w-full sm:w-auto">
+            <div class="flex flex-col gap-1.5 w-full sm:w-auto">
+              <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition border border-emerald-500 shadow-md flex items-center justify-center gap-1" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
+              <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold transition border border-slate-600 flex items-center justify-center gap-1">🧹 清除次數</button>
+            </div>
+            <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
           </div>
         </div>
 
+        <!-- 修正 3：進度條顯示單一項目進度與當前/總數狀態 -->
         <div id="progressContainer" class="hidden bg-slate-800 p-3 rounded-xl border border-slate-700 space-y-1.5">
           <div class="flex justify-between text-xs text-sky-300 font-bold">
             <span id="progressStatusText">⏳ 正在處理中...</span>
@@ -809,13 +864,15 @@ app.get('/', (req, res) => {
 
             if (data.isRunning) {
               actionBtn.innerText = '🛑 停止測試';
-              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
+              actionBtn.className = 'bg-rose-500 hover:bg-rose-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-rose-500/20 flex-1 sm:flex-none transition';
               progressContainer.classList.remove('hidden');
+              
+              // 修正 3：UI顯示單一項目的進度與當前/總數標示
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
-              document.getElementById('progressPercentText').innerText = \`\${data.percent}%\`;
+              document.getElementById('progressPercentText').innerText = \`[\${data.current}/\${data.total}] \${data.percent}%\`;
             } else {
               actionBtn.innerText = '🚀 執行測試';
-              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
+              actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
               if (data.percent === 100 || data.percent === 0) {
                 setTimeout(() => progressContainer.classList.add('hidden'), 3000);
               }
@@ -893,8 +950,14 @@ app.get('/', (req, res) => {
           }
         }
 
+        // 修正 5：匯出 CSV 後透過隱藏 <a> 元素下載，不跳轉頁面並保留在主頁面
         function exportCSV() {
-          window.location.href = '/api/export-csv';
+          const a = document.createElement('a');
+          a.href = '/api/export-csv';
+          a.download = '';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
         }
 
         function updateCardUI(id, r) {
