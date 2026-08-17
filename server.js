@@ -136,6 +136,16 @@ async function getBrowserInstance() {
   return globalBrowser;
 }
 
+// 自動重設崩潰的瀏覽器實例
+async function closeBrowserInstance() {
+  if (globalBrowser) {
+    try {
+      await globalBrowser.close();
+    } catch (e) {}
+    globalBrowser = null;
+  }
+}
+
 function broadcastLog(logText, itemProgress = null) {
   if (logText) globalState.currentLog = logText;
   if (itemProgress !== null) globalState.itemProgress = itemProgress;
@@ -208,9 +218,7 @@ setInterval(() => {
   });
 }, 10000);
 
-async function checkUrlWithPuppeteer(item, retryCount = 0) {
-  let context = null;
-  let page = null;
+async function checkUrlWithPage(page, item) {
   let ga4Fired = false;
   let pageViewDetected = false;
   let utmFoundAnywhere = false;
@@ -241,81 +249,61 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
   let finalUrl = item.url;
 
+  // 監聽並攔截 GA4 / GTM 與靜態資源
+  const requestHandler = (req) => {
+    const resourceType = req.resourceType();
+    const reqUrl = req.url().toLowerCase();
+    const postData = req.postData() || '';
+
+    if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect') || reqUrl.includes('googletagmanager.com')) {
+      ga4Fired = true;
+      if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
+        pageViewDetected = true;
+      }
+      if (utmCampaign && (reqUrl.includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
+        utmFoundAnywhere = true;
+      }
+      req.continue();
+      return;
+    }
+
+    // 封擋影響效能的靜態檔案 (圖片、媒體、字型)
+    if (['image', 'media', 'font'].includes(resourceType)) {
+      req.abort();
+    } else {
+      req.continue();
+    }
+  };
+
   try {
-    broadcastLog(`   🛠️ [${item.name}] 初始化瀏覽器環境...`, 10);
-    const browser = await getBrowserInstance();
-    context = await browser.createBrowserContext();
-    page = await context.newPage();
-
-    // 🎯 啟用請求攔截並精準捕捉 GA4 封包
+    broadcastLog(`   🛠️ [${item.name}] 設定追蹤機制與 Cookie...`, 15);
     await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      const reqUrl = req.url().toLowerCase();
-      const postData = req.postData() || '';
+    page.on('request', requestHandler);
 
-      // 放行並記錄 Google Analytics / GTM 請求
-      if (reqUrl.includes('google-analytics.com') || reqUrl.includes('analytics.google.com') || reqUrl.includes('/g/collect') || reqUrl.includes('googletagmanager.com')) {
-        ga4Fired = true;
-        if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
-          pageViewDetected = true;
-        }
-        if (utmCampaign && (reqUrl.includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
-          utmFoundAnywhere = true;
-        }
-        req.continue();
-        return;
-      }
-
-      // 阻擋非必要資源以提升載入速度與穩定度
-      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1280, height: 800 });
-
-    // 🍪 注入 Cookie 略過 OneTrust 彈窗
-    const cookieHeaderVal = 'OptanonAlertBoxClosed=2026-01-01T00:00:00.000Z; OptanonConsent=isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1;';
-    await page.setExtraHTTPHeaders({ 'cookie': cookieHeaderVal });
-
+    // 預先寫入 CookieConsent，確保 GA4 能寫入並通過條款
     const nowISO = new Date().toISOString();
-    try {
-      await context.setCookies([
-        { name: 'OptanonAlertBoxClosed', value: nowISO, domain: '.costco.com.tw', path: '/' },
-        { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
-      ]);
-    } catch (err) {}
+    await page.setCookie(
+      { name: 'OptanonAlertBoxClosed', value: nowISO, domain: '.costco.com.tw', path: '/' },
+      { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&landingPath=notextracted&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
+    );
 
-    broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
-    
+    broadcastLog(`   🔗 [${item.name}] 開啟目標網頁...`, 30);
     let response = null;
     try {
       response = await withTimeout(
-        page.goto(item.url, { waitUntil: 'networkidle2', timeout: 20000 }),
-        22000,
+        page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 15000 }),
+        18000,
         null
       );
     } catch (e) {
       errorMsg = e.message;
     }
 
-    const httpStatus = response ? response.status() : (page ? 200 : 0);
+    const httpStatus = response ? response.status() : (errorMsg ? 0 : 200);
 
-    broadcastLog(`   🍪 [${item.name}] 檢測 Cookie 狀態...`, 45);
-    const currentCookies = await context.cookies();
-    const optanonSet = currentCookies.some(c => c.name.includes('OptanonConsent') || c.name.includes('OptanonAlertBoxClosed'));
-
-    if (optanonSet || cookieHeaderVal.includes('OptanonConsent')) {
-      isCookieAccepted = true;
-      broadcastLog(`   ✅ [${item.name}] Cookie 同意條款已確認帶入`, 60);
-    }
-
-    // ⏳ 給予足夠時間確保 GA4 封包完整觸發並回傳
-    await delay(3000);
+    broadcastLog(`   ⏳ [${item.name}] 等待 GA4 封包觸發傳送...`, 60);
+    // 留給前端 JS 執行及發送 GA4 event 封包的時間
+    await delay(3500);
 
     try {
       finalUrl = page.url();
@@ -327,6 +315,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       utmFoundAnywhere = true;
     }
 
+    isCookieAccepted = true;
     const isPass = (httpStatus === 200 || httpStatus === 304) && ga4Fired;
     broadcastLog(`   🏁 [${item.name}] 檢測完成`, 95);
 
@@ -352,52 +341,13 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: ga4Fired ? '存在' : '缺失'
     };
 
-  } catch (error) {
-    if (stopRequested) throw new Error('使用者手動中斷測試');
-
-    if (retryCount < 1) {
-      broadcastLog(`   ⚠️ [${item.name}] 載入異常，進行自動重試...`, 30);
-      if (page) await page.close().catch(() => {});
-      if (context) await context.close().catch(() => {});
-      await delay(1000);
-      return await checkUrlWithPuppeteer(item, retryCount + 1);
-    }
-
-    return {
-      id: item.id,
-      name: item.name,
-      time: recordTime,
-      campaign: utmCampaign || item.name,
-      status: 'FAIL',
-      httpStatus: 0,
-      utm_source: utmSource,
-      utm_medium: utmMedium,
-      utm_campaign: utmCampaign,
-      cookieAccepted: 'FALSE',
-      gtag: 'FALSE',
-      ga4CollectDetected: 'FALSE',
-      pageViewDetected: 'FALSE',
-      finalUrl: finalUrl,
-      error: error.message || '連線失敗',
-      url: item.url,
-      statusText: '連線失敗',
-      utmKept: '無',
-      ga4Exist: '無'
-    };
   } finally {
-    // 💡 確保每次執行完畢後安全關閉分頁與 Context，防止記憶體洩漏與第二次卡死
-    if (page) {
-      try {
-        page.removeAllListeners('request');
-        page.removeAllListeners('response');
-        await withTimeout(page.close(), 1500);
-      } catch (e) {}
-    }
-    if (context) {
-      try {
-        await withTimeout(context.close(), 1500);
-      } catch (e) {}
-    }
+    // 移除 Request 監聽器並重置頁面狀態，防範記憶體溢出
+    page.removeListener('request', requestHandler);
+    try {
+      await page.setRequestInterception(false);
+      await withTimeout(page.goto('about:blank'), 3000);
+    } catch (e) {}
   }
 }
 
@@ -411,84 +361,107 @@ async function runBackgroundTest(selectedTargets) {
 
   broadcastLog(`🚀 背景測試已啟動，共選取 ${selectedTargets.length} 個目標`, 0);
 
-  for (const [index, item] of selectedTargets.entries()) {
-    if (stopRequested) {
-      broadcastLog(`🛑 收到停止指令，測試已中斷！`, 0);
-      break;
-    }
+  let browser = null;
+  let page = null;
 
-    if (!globalState.autoCheck.selectedIds.includes(item.id)) {
-      continue;
-    }
+  try {
+    browser = await getBrowserInstance();
+    page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1280, height: 800 });
 
-    globalState.current = index + 1;
-    broadcastLog(`▶️ [${index + 1}/${selectedTargets.length}] 開始檢測: ${item.name}`, 0);
-
-    let result;
-    try {
-      result = await checkUrlWithPuppeteer(item);
-    } catch (err) {
+    for (const [index, item] of selectedTargets.entries()) {
       if (stopRequested) {
-        broadcastLog(`🛑 測試中斷，已跳過後續項目`, 0);
+        broadcastLog(`🛑 收到停止指令，測試已中斷！`, 0);
         break;
       }
-      result = {
-        id: item.id,
-        name: item.name,
-        time: new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
-        campaign: item.name,
-        status: 'FAIL',
-        httpStatus: 0,
-        utm_source: '',
-        utm_medium: '',
-        utm_campaign: '',
-        cookieAccepted: 'FALSE',
-        gtag: 'FALSE',
-        ga4CollectDetected: 'FALSE',
-        pageViewDetected: 'FALSE',
-        finalUrl: item.url,
-        error: '連線失敗',
-        url: item.url,
-        statusText: '連線失敗',
-        utmKept: '無',
-        ga4Exist: '無'
-      };
-    }
 
-    if (stopRequested) break;
-
-    if (globalState.autoCheck.selectedIds.includes(item.id)) {
-      globalState.results[item.id] = result;
-
-      if (!globalState.stats[item.id]) {
-        globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
+      if (!globalState.autoCheck.selectedIds.includes(item.id)) {
+        continue;
       }
 
-      const isPass = result.status === 'PASS';
+      globalState.current = index + 1;
+      broadcastLog(`▶️ [${index + 1}/${selectedTargets.length}] 開始檢測: ${item.name}`, 0);
 
-      globalState.stats[item.id].total += 1;
-      if (isPass) {
-        globalState.stats[item.id].success += 1;
-      } else {
-        globalState.stats[item.id].fail += 1;
+      let result;
+      try {
+        result = await checkUrlWithPage(page, item);
+      } catch (err) {
+        if (stopRequested) {
+          broadcastLog(`🛑 測試中斷，已跳過後續項目`, 0);
+          break;
+        }
+
+        // 遭遇重大錯誤時嘗試重啟 Page 實例
+        try {
+          if (page) await page.close().catch(() => {});
+          page = await browser.newPage();
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
+        } catch (e) {
+          await closeBrowserInstance();
+          browser = await getBrowserInstance();
+          page = await browser.newPage();
+        }
+
+        result = {
+          id: item.id,
+          name: item.name,
+          time: new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
+          campaign: item.name,
+          status: 'FAIL',
+          httpStatus: 0,
+          utm_source: '',
+          utm_medium: '',
+          utm_campaign: '',
+          cookieAccepted: 'FALSE',
+          gtag: 'FALSE',
+          ga4CollectDetected: 'FALSE',
+          pageViewDetected: 'FALSE',
+          finalUrl: item.url,
+          error: err.message || '連線失敗',
+          url: item.url,
+          statusText: '連線失敗',
+          utmKept: '無',
+          ga4Exist: '無'
+        };
       }
 
-      broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
-    }
+      if (stopRequested) break;
 
-    if (global.gc) {
-      try { global.gc(); } catch (e) {}
-    }
+      if (globalState.autoCheck.selectedIds.includes(item.id)) {
+        globalState.results[item.id] = result;
 
-    if (index < selectedTargets.length - 1 && !stopRequested) {
-      await delay(1000); // 增加項目間隔緩衝，避免請求過快導致瀏覽器崩潰
-    }
-  }
+        if (!globalState.stats[item.id]) {
+          globalState.stats[item.id] = { total: 0, success: 0, fail: 0 };
+        }
 
-  globalState.isRunning = false;
-  if (!stopRequested) {
-    const finishTime = new Date().toLocaleTimeString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
-    broadcastLog(`✨ 本輪檢測完成！(${finishTime})`, 100);
+        const isPass = result.status === 'PASS';
+
+        globalState.stats[item.id].total += 1;
+        if (isPass) {
+          globalState.stats[item.id].success += 1;
+        } else {
+          globalState.stats[item.id].fail += 1;
+        }
+
+        broadcastLog(`✅ [${index + 1}/${selectedTargets.length}] ${item.name} 檢測完成 (${result.status} | HTTP:${result.httpStatus})`, 100);
+      }
+
+      if (index < selectedTargets.length - 1 && !stopRequested) {
+        await delay(500);
+      }
+    }
+  } catch (err) {
+    broadcastLog(`⚠️ 測試執行出現異常: ${err.message}`);
+  } finally {
+    if (page) {
+      try { await page.close(); } catch (e) {}
+    }
+    globalState.isRunning = false;
+    if (!stopRequested) {
+      const finishTime = new Date().toLocaleTimeString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
+      broadcastLog(`✨ 本輪檢測完成！(${finishTime})`, 100);
+    }
   }
 }
 
