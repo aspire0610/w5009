@@ -252,7 +252,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
 
-    // CDP 攔截邏輯
     try {
       cdpSession = await page.target().createCDPSession();
       await cdpSession.send('Fetch.enable', {
@@ -308,7 +307,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       console.warn('CDP Session 初始化警告:', cdpErr.message);
     }
 
-    // 注入偽裝腳本
     await page.evaluateOnNewDocument(() => {
       try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
       try {
@@ -343,10 +341,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     });
 
-    // -------------------------------------------------------------
-    // 【修改點 1】增加第一次請求前的緩衝時間（拉長至 2000ms ~ 4000ms）
-    // 讓 Stealth 隱身外掛有更充裕的時間完整注入變數與指紋
-    // -------------------------------------------------------------
     const preBufferTime = Math.floor(Math.random() * 2000) + 2000;
     await delay(preBufferTime);
 
@@ -354,8 +348,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     let response = null;
     try {
-      // 【修改點 2】放寬等待策略，避免第一次容易在 domcontentloaded 卡死
-      // 如果 retryCount > 0（代表已經失敗重試過），放寬至更寬鬆的 load 或縮短逾時
       response = await page.goto(item.url, {
         waitUntil: retryCount === 0 ? 'domcontentloaded' : 'load',
         timeout: 35000
@@ -372,13 +364,11 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
-    // 模擬真人滾動
     broadcastLog(`   🖱️ [${item.name}] 執行真人軌跡移動與頁面滾動...`);
     await simulateHumanMouse(page, 150, 150, 600, 450);
     await page.mouse.wheel({ deltaY: 400 }).catch(() => {});
     await new Promise(r => setTimeout(r, 500));
 
-    // 多重 DOM 物件驗證
     let elapsed = 0;
     while (elapsed < 5000) {
       if (ga4Fired || stopRequested) break;
@@ -425,7 +415,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     if (stopRequested) throw new Error('使用者手動中斷測試');
 
     if (retryCount < 1) {
-      // 【修改點 3】拉長重試的間隔時間（從 2 秒增加至 3.5 秒），避免被當作連續攻擊阻擋
       broadcastLog(`   ⚠️ [${item.name}] 載入失敗 (${error.message})，將於 3.5 秒後進行第 2 次重試...`);
       if (cdpSession) await cdpSession.detach().catch(() => {});
       if (page) await page.close().catch(() => {});
@@ -527,6 +516,41 @@ app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.get('/api/targets', (req, res) => res.json(targetList));
 
+// -------------------------------------------------------------
+// 【匯出 CSV 檔案 API 路由】
+// -------------------------------------------------------------
+app.get('/api/export-csv', (req, res) => {
+  const results = globalState.results;
+  const ids = Object.keys(results);
+
+  if (ids.length === 0) {
+    return res.status(400).send('目前尚無檢測結果資料可匯出');
+  }
+
+  // CSV 表頭
+  let csvContent = 'ID,項目名稱,連線狀態,UTM參數,GA4觸發,目標網址\n';
+
+  // 組合內容 (若包含雙引號或逗號則予以處理)
+  ids.forEach(id => {
+    const item = results[id];
+    const cleanName = `"${(item.name || '').replace(/"/g, '""')}"`;
+    const cleanUrl = `"${(item.url || '').replace(/"/g, '""')}"`;
+
+    csvContent += `${item.id},${cleanName},${item.statusText},${item.utmKept},${item.ga4Exist},${cleanUrl}\n`;
+  });
+
+  // 加入 UTF-8 BOM 避免 Excel 開啟繁體中文亂碼
+  const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
+  const buffer = Buffer.concat([bom, Buffer.from(csvContent, 'utf-8')]);
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const fileName = `test_results_${timestamp}.csv`;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.status(200).send(buffer);
+});
+
 app.post('/api/config-auto-check', (req, res) => {
   const { enabled, intervalSeconds, maxRuns, selectedIds } = req.body;
 
@@ -611,6 +635,7 @@ app.get('/', (req, res) => {
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
           <div class="flex items-center gap-2 w-full sm:w-auto">
+            <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold transition border border-emerald-500 shrink-0 shadow-md" title="將目前的測試結果導出為 CSV 檔">📥 匯出 CSV</button>
             <button onclick="resetStats()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2.5 rounded-lg text-xs font-bold transition border border-slate-600 shrink-0" title="清除所有項目的歷史測試次數">🧹 清除次數</button>
             <button onclick="toggleTest()" id="actionBtn" class="bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition">🚀 執行測試</button>
           </div>
@@ -798,6 +823,11 @@ app.get('/', (req, res) => {
           } catch (err) {
             alert('清除失敗，請重試');
           }
+        }
+
+        // 前端觸發 CSV 下載函式
+        function exportCSV() {
+          window.location.href = '/api/export-csv';
         }
 
         function updateCardUI(id, r) {
