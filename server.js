@@ -122,17 +122,7 @@ async function getBrowserInstance() {
       '--window-size=1440,900',
       '--lang=zh-TW,zh',
       '--disable-web-security',
-      '--allow-running-insecure-content',
-      '--js-flags="--max-old-space-size=256"',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-client-side-phishing-detection',
-      '--disable-default-apps',
-      '--disable-extensions',
-      '--disable-sync',
-      '--disable-speech-api',
-      '--disable-print-preview',
-      '--mute-audio'
+      '--allow-running-insecure-content'
     ]
   });
 
@@ -263,7 +253,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    // 設定適當超時
     page.setDefaultNavigationTimeout(30000);
     page.setDefaultTimeout(30000);
 
@@ -271,33 +260,40 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
 
-    // 過濾非必要靜態資源以加速載入
+    // 設定安全穩定的請求攔截機制
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      const reqUrl = req.url();
+      try {
+        if (req.isInterceptResolutionHandled()) return;
 
-      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-        req.abort();
-        return;
+        const resourceType = req.resourceType();
+        const reqUrl = req.url();
+
+        // 放行 JS 檔以保證 GA4 載入，僅過濾圖片與字型
+        if (['image', 'font', 'media'].includes(resourceType)) {
+          req.abort().catch(() => {});
+          return;
+        }
+
+        if (utmCampaign && reqUrl.toLowerCase().includes(utmCampaign.toLowerCase())) {
+          utmFoundAnywhere = true;
+        }
+
+        const isGA4Collect = 
+          reqUrl.includes('/g/collect') || 
+          reqUrl.includes('google-analytics.com/collect') ||
+          reqUrl.includes('analytics.google.com/g/collect');
+
+        if (isGA4Collect) {
+          ga4Fired = true;
+          pageViewDetected = true;
+          broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路請求!`, 65);
+        }
+
+        req.continue().catch(() => {});
+      } catch (e) {
+        // 防止意外拋錯掛起請求
       }
-
-      if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()))) {
-        utmFoundAnywhere = true;
-      }
-
-      const isGA4Collect = 
-        reqUrl.includes('/g/collect') || 
-        reqUrl.includes('google-analytics.com/collect') ||
-        reqUrl.includes('analytics.google.com/g/collect');
-
-      if (isGA4Collect) {
-        ga4Fired = true;
-        pageViewDetected = true;
-        broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路請求!`, 65);
-      }
-
-      req.continue();
     });
 
     await page.evaluateOnNewDocument(() => {
@@ -326,14 +322,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     
     let response = null;
     try {
-      // 採用 commit 模式，伺服器一回應即繼續，解決 DOM/靜態資源超時
+      // 改用 domcontentloaded 提升頁面加載完成率，避免 commit/load 卡住
       response = await page.goto(item.url, {
-        waitUntil: 'commit',
+        waitUntil: 'domcontentloaded',
         timeout: 25000
       });
     } catch (e) {
       errorMsg = e.message;
-      broadcastLog(`   ⚠️ [${item.name}] 載入超時或部分連線異常，嘗試繼續解析網頁...`, 40);
+      broadcastLog(`   ⚠️ [${item.name}] 頁面載入逾時，繼續嘗試解析頁面...`, 40);
     }
 
     await delay(1000);
@@ -357,7 +353,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         if (btn) {
           await btn.click().catch(() => {});
           cookieClicked = true;
-          broadcastLog(`   ✅ [${item.name}] 已成功自動點擊 Cookie 同意按鈕 (${selector})`, 50);
+          broadcastLog(`   ✅ [${item.name}] 已成功點擊 Cookie 按鈕 (${selector})`, 50);
           break;
         }
       }
@@ -375,13 +371,8 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
           }
           return false;
         }).catch(() => false);
-        if (cookieClicked) {
-          broadcastLog(`   ✅ [${item.name}] 已通過文字特徵自動點擊 Cookie 同意按鈕`, 50);
-        }
       }
-    } catch (e) {
-      console.warn('Cookie 點擊嘗試失敗:', e.message);
-    }
+    } catch (e) {}
 
     broadcastLog(`   🖱️ [${item.name}] 模擬真實人類滑鼠移動與頁面滾動...`, 60);
     await simulateHumanMouse(page, 150, 150, 600, 450);
@@ -936,7 +927,7 @@ app.get('/', (req, res) => {
           const card = document.getElementById('card-' + id);
           if (!card) return;
 
-          const isOkStatus = (r.httpStatus === 200);
+          const isOkStatus = (r.httpStatus === 200 || r.httpStatus === 304);
           const statusEl = card.querySelector('.status-val');
           statusEl.textContent = isOkStatus ? '✅ ' + r.statusText : '❌ ' + r.statusText;
           statusEl.className = 'status-val font-bold ' + (isOkStatus ? 'text-emerald-400' : 'text-rose-400');
