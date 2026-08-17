@@ -272,17 +272,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     context = await browser.createBrowserContext();
     page = await context.newPage();
 
-    // 優化1：阻擋不必要的靜態資源 (圖片/媒體/樣式/字型)，減少系統 CPU 與記憶體負擔
-    await page.setRequestInterception(true);
-    page.on('request', req => {
-      const resourceType = req.resourceType();
-      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
+    // 修正 Status 0 原因1：移除 page.setRequestInterception，避免與 CDP Fetch 衝突導致連線斷開
     await page.setBypassCSP(true);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1440, height: 900 });
@@ -296,45 +286,48 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
         let reqUrl = request.url;
         let postData = request.postData || '';
 
-        if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
-          utmFoundAnywhere = true;
-        }
-
-        const isGA4Collect = 
-          reqUrl.includes('/g/collect') || 
-          reqUrl.includes('google-analytics.com/collect') ||
-          reqUrl.includes('analytics.google.com/g/collect');
-
-        let modifiedUrl = reqUrl;
-        let modifiedPostData = postData;
-
-        if (isGA4Collect) {
-          ga4Fired = true;
-          broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路封包請求!`, 65);
-          if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
-            pageViewDetected = true;
+        try {
+          if (utmCampaign && (reqUrl.toLowerCase().includes(utmCampaign.toLowerCase()) || postData.toLowerCase().includes(utmCampaign.toLowerCase()))) {
+            utmFoundAnywhere = true;
           }
 
-          try {
-            let urlObj = new URL(reqUrl);
-            if (!urlObj.searchParams.has('_dbg')) urlObj.searchParams.set('_dbg', '1');
-            if (!urlObj.searchParams.has('ep.debug_mode')) urlObj.searchParams.set('ep.debug_mode', 'true');
-            modifiedUrl = urlObj.toString();
+          const isGA4Collect = 
+            reqUrl.includes('/g/collect') || 
+            reqUrl.includes('google-analytics.com/collect') ||
+            reqUrl.includes('analytics.google.com/g/collect');
 
-            if (request.method === 'POST' && postData) {
-              if (!postData.includes('_dbg=')) modifiedPostData += '&_dbg=1';
-              if (!postData.includes('ep.debug_mode=')) modifiedPostData += '&ep.debug_mode=true';
+          let modifiedUrl = reqUrl;
+          let modifiedPostData = postData;
+
+          if (isGA4Collect) {
+            ga4Fired = true;
+            broadcastLog(`   📡 [${item.name}] 攔截到 GA4 Collect 網路封包請求!`, 65);
+            if (reqUrl.includes('en=page_view') || postData.includes('en=page_view')) {
+              pageViewDetected = true;
             }
-          } catch (e) {}
-        }
 
-        try {
+            try {
+              let urlObj = new URL(reqUrl);
+              if (!urlObj.searchParams.has('_dbg')) urlObj.searchParams.set('_dbg', '1');
+              if (!urlObj.searchParams.has('ep.debug_mode')) urlObj.searchParams.set('ep.debug_mode', 'true');
+              modifiedUrl = urlObj.toString();
+
+              if (request.method === 'POST' && postData) {
+                if (!postData.includes('_dbg=')) modifiedPostData += '&_dbg=1';
+                if (!postData.includes('ep.debug_mode=')) modifiedPostData += '&ep.debug_mode=true';
+              }
+            } catch (e) {}
+          }
+
           await cdpSession.send('Fetch.continueRequest', {
             requestId,
             url: modifiedUrl !== reqUrl ? modifiedUrl : undefined,
             postData: (modifiedPostData !== postData && modifiedPostData) ? Buffer.from(modifiedPostData).toString('base64') : undefined
           });
-        } catch (err) {}
+        } catch (err) {
+          // 修正 Status 0 原因2：確保攔截失敗或處理例外時，強迫放行該請求，防止請求永遠 Pending
+          await cdpSession.send('Fetch.continueRequest', { requestId }).catch(() => {});
+        }
       });
 
     } catch (cdpErr) {
@@ -373,13 +366,14 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       });
     } catch (e) {
       errorMsg = e.message;
-      broadcastLog(`   ⚠️ [${item.name}] 載入超時，嘗試繼續解析網頁...`, 40);
+      broadcastLog(`   ⚠️ [${item.name}] 載入超時或部分連線異常，嘗試繼續解析網頁...`, 40);
     }
 
     await delay(500);
     const httpStatus = response ? response.status() : 0;
 
-    if (httpStatus === 0 && !response) {
+    // 修正 Status 0 原因3：只有當無 Response 且沒載入成功時才算真正失敗
+    if (httpStatus === 0 && !response && !errorMsg) {
       throw new Error('網頁回應失敗 (Status 0)');
     }
 
@@ -522,7 +516,6 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
       ga4Exist: '無'
     };
   } finally {
-    // 優化2：強制釋放 CDP Session 與 Page 事件防堵 Memory Leak
     if (cdpSession) {
       try { cdpSession.removeAllListeners(); } catch (e) {}
       await cdpSession.detach().catch(() => {});
@@ -618,7 +611,6 @@ async function runBackgroundTest(selectedTargets) {
     }
   }
 
-  // 優化3：主動清理 Browser 與垃圾回收
   if (globalBrowser) {
     await globalBrowser.close().catch(() => {});
     globalBrowser = null;
@@ -781,7 +773,6 @@ app.get('/', (req, res) => {
             <h1 class="text-xl font-bold text-sky-400">⚡ UTM & 真實瀏覽器監測儀表板</h1>
             <p class="text-xs text-slate-400">Puppeteer Stealth 隱身瀏覽器 · 隨機延遲與貝茲軌跡版</p>
           </div>
-          <!-- 優化：按鈕樣式修改，限制寬度並減小內距，避免過寬 -->
           <div class="flex items-center gap-3 w-full sm:w-auto shrink-0">
             <div class="flex flex-col gap-1.5 w-auto">
               <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-bold transition border border-emerald-500 shadow-sm flex items-center justify-center whitespace-nowrap" title="匯出 GA4 報表格式 CSV">📥 匯出 CSV</button>
