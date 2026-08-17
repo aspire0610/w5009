@@ -746,7 +746,7 @@ app.get('/', (req, res) => {
               document.getElementById('progressBar').style.width = \`\${data.percent}%\`;
               document.getElementById('progressPercentText').innerText = \`\${data.percent}%\`;
             } else {
-              actionBtn.innerText = '🚀 執行測試';
+              actionBtn.innerText = '🚀 執行';
               actionBtn.className = 'bg-sky-500 hover:bg-sky-600 text-white px-5 py-2.5 rounded-lg font-bold shadow-lg shadow-sky-500/20 flex-1 sm:flex-none transition';
               if (data.percent === 100 || data.percent === 0) {
                 setTimeout(() => progressContainer.classList.add('hidden'), 3000);
