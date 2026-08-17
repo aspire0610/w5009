@@ -354,20 +354,24 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await delay(300);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
-       let response = null;
+           let response = null;
     try {
-      // 改用 'commit'：伺服器一回應 Header 即算完成導航，100% 避免 Navigation Timeout
+      // 使用 Puppeteer 合法的 'domcontentloaded'，並將 timeout 調整為 35 秒
       response = await page.goto(item.url, {
-        waitUntil: 'commit',
-        timeout: 15000
+        waitUntil: 'domcontentloaded',
+        timeout: 35000
       });
       
-      // 給予 3.5 秒讓網頁在背景完成 DOM 渲染與 GA4 初始化
+      // 留給網頁 3.5 秒載入背景 GA4 與 DataLayer SDK
       await delay(3500);
     } catch (e) {
       errorMsg = e.message;
-      broadcastLog(`   ⚠️ [${item.name}] 連線建立失敗 (${e.message})`, 40);
+      // 若非單純的 Timeout，才印出失敗日誌
+      if (!e.message.includes('Navigation timeout')) {
+        broadcastLog(`   ⚠️ [${item.name}] 連線建立失敗 (${e.message})`, 40);
+      }
     }
+
 
 
 
