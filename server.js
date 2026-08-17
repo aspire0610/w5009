@@ -354,20 +354,21 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await delay(300);
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
-   let response = null;
-try {
-  // 改用 domcontentloaded，只要 DOM 結構出來就繼續，不卡在背景第三方資源
-  response = await page.goto(item.url, {
-    waitUntil: 'domcontentloaded',
-    timeout: 15000
-  });
-  
-  // 額外給予 2.5 秒讓 GA4 SDK 與第三方追蹤碼完成初始化發送
-  await delay(2500);
-} catch (e) {
-  errorMsg = e.message;
-  broadcastLog(`   ⚠️ [${item.name}] 主頁面載入失敗 (${e.message})`, 40);
-}
+       let response = null;
+    try {
+      // 改用 'commit'：伺服器一回應 Header 即算完成導航，100% 避免 Navigation Timeout
+      response = await page.goto(item.url, {
+        waitUntil: 'commit',
+        timeout: 15000
+      });
+      
+      // 給予 3.5 秒讓網頁在背景完成 DOM 渲染與 GA4 初始化
+      await delay(3500);
+    } catch (e) {
+      errorMsg = e.message;
+      broadcastLog(`   ⚠️ [${item.name}] 連線建立失敗 (${e.message})`, 40);
+    }
+
 
 
     await delay(500);
