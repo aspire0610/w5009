@@ -282,11 +282,16 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 🍪 預先寫入 Cookie 憑證，降低 Cookie 彈窗與網頁阻擋風險
-    await context.setCookies([
-      { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: '.costco.com.tw', path: '/' },
-      { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
-    ]).catch(() => {});
+    // 🍪 預先寫入 Cookie 憑證（若寫入成功，預設設為同意狀態）
+    try {
+      await context.setCookies([
+        { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain: '.costco.com.tw', path: '/' },
+        { name: 'OptanonConsent', value: 'isGpcEnabled=0&datagroups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1', domain: '.costco.com.tw', path: '/' }
+      ]);
+      isCookieAccepted = true; // 憑證注入成功即可視為已通過 Cookie 驗證
+    } catch (err) {
+      isCookieAccepted = false;
+    }
 
     broadcastLog(`   🔗 [${item.name}] 前往目標網址...`, 25);
     
@@ -302,7 +307,7 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const httpStatus = response ? response.status() : (page ? 200 : 0);
 
-    // 🍪 自動點擊 Cookie 授權（帶有 3 秒強制 Race Timeout）
+    // 🍪 嘗試補捕獲畫面上的 Cookie 彈窗點擊
     broadcastLog(`   🍪 [${item.name}] 檢測並自動處理 Cookie...`, 45);
     
     const clickCookieAction = async () => {
@@ -328,9 +333,9 @@ async function checkUrlWithPuppeteer(item, retryCount = 0) {
 
     const clicked = await withTimeout(clickCookieAction(), 3000, false);
     if (clicked) {
+      isCookieAccepted = true;
       broadcastLog(`   ✅ [${item.name}] 成功點擊 Cookie 同意按鈕`, 55);
     }
-    isCookieAccepted = true;
 
     await delay(1200);
 
